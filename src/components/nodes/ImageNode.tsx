@@ -28,6 +28,8 @@ const ImageNode = ({ id, data, selected }: NodeProps) => {
 
   const aspectRatio = d?.aspectRatio || modelDef.defaultAspectRatio;
   const sizeLevel = d?.sizeLevel || modelDef.defaultSize;
+  // 子模型变体(对齐 gpt-image-2-web 的 g_model/n_model)
+  const apiModel = d?.apiModel || modelDef.apiModel;
   const status: 'idle' | 'generating' | 'success' | 'error' = d?.status || 'idle';
   const imageUrl = d?.imageUrl as string | undefined;
   const localPrompt = d?.prompt || '';
@@ -37,7 +39,7 @@ const ImageNode = ({ id, data, selected }: NodeProps) => {
   // 切换模型时,如果当前比例/尺寸不在新模型选项里则重置
   const switchModel = (mId: string) => {
     const newDef = IMAGE_MODELS.find((m) => m.id === mId) || IMAGE_MODELS[0];
-    const patch: any = { model: mId };
+    const patch: any = { model: mId, apiModel: newDef.apiModel };
     if (!newDef.aspectRatios.includes(aspectRatio)) patch.aspectRatio = newDef.defaultAspectRatio;
     if (!newDef.sizes.includes(sizeLevel)) patch.sizeLevel = newDef.defaultSize;
     update(patch);
@@ -102,7 +104,7 @@ const ImageNode = ({ id, data, selected }: NodeProps) => {
       const allRefs = [...refImages, ...upstreamImages].slice(0, modelDef.maxReferenceImages);
       const res = await generateImage({
         model: modelDef.id,
-        apiModel: modelDef.apiModel,
+        apiModel: apiModel,
         paramKind: modelDef.paramKind,
         prompt: finalPrompt,
         aspect_ratio: aspectRatio,
@@ -181,6 +183,20 @@ const ImageNode = ({ id, data, selected }: NodeProps) => {
               );
             })}
           </div>
+        </div>
+
+        {/* 子模型选择(对齐主项目 Tab 内的 model 下拉) */}
+        <div>
+          <label className="text-[10px] text-white/50 block mb-1">具体模型</label>
+          <select
+            value={apiModel}
+            onChange={(e) => update({ apiModel: e.target.value })}
+            className="w-full rounded bg-white/5 border border-white/10 px-2 py-1 text-xs text-white outline-none focus:border-white/30"
+          >
+            {modelDef.apiModelOptions.map((opt) => (
+              <option key={opt.value} value={opt.value} className="bg-zinc-900">{opt.label}</option>
+            ))}
+          </select>
         </div>
 
         {/* 比例 + 尺寸 并排 */}

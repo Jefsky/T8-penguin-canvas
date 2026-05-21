@@ -13,12 +13,14 @@ export type ImageParamKind = 'gpt-size' | 'banana-ratio';
 
 export interface ImageModelDef {
   id: string;             // 节点内部 id(如 'gpt-image-2')
-  apiModel: string;       // 上游真实模型名(透传给 API)
+  apiModel: string;       // 默认上游真实模型名(透传给 API)
   label: string;          // 长名(用于描述行)
   tabLabel: string;       // TAB 短名
   provider: ProviderType;
   paramKind: ImageParamKind;
   capabilities: ('t2i' | 'i2i' | 'edit' | 'text-render')[];
+  // 子模型变体(对齐主项目 gpt-image-2-web 的 g_model / n_model 下拉)
+  apiModelOptions: Array<{ value: string; label: string }>;
   // 比例选项(双协议通用,Auto/1:1/16:9 …)
   aspectRatios: string[];
   defaultAspectRatio: string;
@@ -41,17 +43,21 @@ const BANANA_PRO_RATIOS = ['Auto', '1:1', '16:9', '4:3', '4:5', '3:2', '2:3', '3
 export const IMAGE_MODELS: ImageModelDef[] = [
   {
     id: 'gpt-image-2',
-    apiModel: 'gpt-image-2-all', // 主项目 GPT2 默认走逆向分组(便宜)
+    apiModel: 'gpt-image-2-all', // 主项目 Tab 0 默认选中
     label: 'GPT Image 2',
     tabLabel: 'GPT2',
     provider: 'zhenzhen',
     paramKind: 'gpt-size',
     capabilities: ['t2i', 'i2i', 'edit', 'text-render'],
+    apiModelOptions: [
+      { value: 'gpt-image-2-all', label: 'gpt-image-2-all (逆向分组)' },
+      { value: 'gpt-image-2', label: 'gpt-image-2 (官转分组)' },
+      { value: 'gpt-image-2-fal', label: 'gpt-image-2-fal (FAL 代理)' },
+    ],
     aspectRatios: GPT_RATIOS,
     defaultAspectRatio: '1:1',
-    // gpt-image-2 支持像素串自由组合,UI 用 1K/2K/4K 等级,后端再映射成像素串
     sizes: ['1K', '2K', '4K'],
-    defaultSize: '1K',
+    defaultSize: '2K', // 主项目默认为 2K
     supportsReference: true,
     maxReferenceImages: 5,
     description: '支持文生图/图生图/编辑/文字渲染',
@@ -64,6 +70,9 @@ export const IMAGE_MODELS: ImageModelDef[] = [
     provider: 'zhenzhen',
     paramKind: 'banana-ratio',
     capabilities: ['t2i', 'i2i'],
+    apiModelOptions: [
+      { value: 'nano-banana-2', label: 'nano-banana-2 (Flash)' },
+    ],
     aspectRatios: BANANA_FLASH_RATIOS,
     defaultAspectRatio: '1:1',
     sizes: ['1K', '2K', '4K'],
@@ -80,6 +89,11 @@ export const IMAGE_MODELS: ImageModelDef[] = [
     provider: 'zhenzhen',
     paramKind: 'banana-ratio',
     capabilities: ['t2i', 'i2i', 'edit'],
+    apiModelOptions: [
+      { value: 'nano-banana-pro', label: 'nano-banana-pro' },
+      { value: 'nano-banana-pro-2k', label: 'nano-banana-pro-2k' },
+      { value: 'nano-banana-pro-4k', label: 'nano-banana-pro-4k' },
+    ],
     aspectRatios: BANANA_PRO_RATIOS,
     defaultAspectRatio: '1:1',
     sizes: ['1K', '2K', '4K'],

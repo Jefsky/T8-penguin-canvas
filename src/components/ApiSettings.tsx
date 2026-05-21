@@ -133,13 +133,18 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
               <span className={`text-[11px] font-normal ${hintCls}`}>
                 · 用于图像/视频/音频生成
               </span>
+              {settings.zhenzhenApiKey && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  ✓ 已保存 {settings.zhenzhenApiKey}
+                </span>
+              )}
             </label>
             <div className="flex items-center gap-2">
               <input
                 type={showZ ? 'text' : 'password'}
                 value={zhenzhenKey}
                 onChange={(e) => setZhenzhenKey(e.target.value)}
-                placeholder={settings.zhenzhenApiKey || '请输入 sk-...'}
+                placeholder={settings.zhenzhenApiKey ? '留空保持不变 / 输入新值覆盖' : '请输入 sk-...'}
                 className={inputCls}
               />
               <button
@@ -160,13 +165,18 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
               <span className="w-2 h-2 rounded-full bg-cyan-400" />
               RunningHub API Key
               <span className={`text-[11px] font-normal ${hintCls}`}>· 用于 RH 工作流</span>
+              {settings.rhApiKey && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  ✓ 已保存 {settings.rhApiKey}
+                </span>
+              )}
             </label>
             <div className="flex items-center gap-2">
               <input
                 type={showR ? 'text' : 'password'}
                 value={rhKey}
                 onChange={(e) => setRhKey(e.target.value)}
-                placeholder={settings.rhApiKey || '请输入 RunningHub Key'}
+                placeholder={settings.rhApiKey ? '留空保持不变 / 输入新值覆盖' : '请输入 RunningHub Key'}
                 className={inputCls}
               />
               <button
@@ -189,13 +199,18 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
               <span className={`text-[11px] font-normal ${hintCls}`}>
                 · 额度隔离 · 用于 LLM/Vision
               </span>
+              {settings.llmApiKey && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  ✓ 已保存 {settings.llmApiKey}
+                </span>
+              )}
             </label>
             <div className="flex items-center gap-2">
               <input
                 type={showL ? 'text' : 'password'}
                 value={llmKey}
                 onChange={(e) => setLlmKey(e.target.value)}
-                placeholder={settings.llmApiKey || '请输入 LLM 独立 Key'}
+                placeholder={settings.llmApiKey ? '留空保持不变 / 输入新值覆盖' : '请输入 LLM 独立 Key'}
                 className={inputCls}
               />
               <button
