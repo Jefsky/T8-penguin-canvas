@@ -5,15 +5,25 @@ import { IMAGE_MODELS } from '../../providers/models';
 import { generateImage } from '../../services/generation';
 import { useUpdateNodeData } from './useUpdateNodeData';
 import { useRunTrigger } from '../../hooks/useRunTrigger';
+import { useThemeStore } from '../../stores/theme';
 
 /**
- * ImageNode - ZhenzhenMagic
- * 支持 gpt-image-2 / nano-banana-2 / nano-banana-pro
- * 自动从上游连接的 text 节点读取 prompt
+ * ImageNode - 图像生成(ZhenzhenMagic)
+ * 多 TAB 切换:GPT Image 2 / Nano Banana Pro / Nano Banana 2
+ * 对应主项目 gpt-image-2-web 的 Tab 0/1/2 设计
+ * 自动从上游连接的 text 节点读取 prompt,从上游 image 节点读取参考图
  */
+// TAB 短名(按 IMAGE_MODELS 顺序)
+const MODEL_TAB_LABELS: Record<string, string> = {
+  'gpt-image-2': 'GPT2',
+  'nano-banana-2': '香蕉2',
+  'nano-banana-pro': '香蕉Pro',
+};
 const ImageNode = ({ id, data, selected }: NodeProps) => {
   const update = useUpdateNodeData(id);
   const { getEdges, getNodes } = useReactFlow();
+  const { style } = useThemeStore();
+  const isPixel = style === 'pixel';
 
   const [error, setError] = useState<string | null>(null);
   const d = data as any;
@@ -117,27 +127,51 @@ const ImageNode = ({ id, data, selected }: NodeProps) => {
           <ImageIcon size={13} />
         </div>
         <div className="flex-1">
-          <div className="text-sm font-semibold text-white">ZhenzhenMagic</div>
-          <div className="text-[10px] text-white/40">{modelDef.label}</div>
+          <div className="text-sm font-semibold text-white">图像生成</div>
+          <div className="text-[10px] text-white/40">{modelDef.label} · {modelDef.description}</div>
         </div>
       </div>
 
       {/* 配置区 */}
       <div className="p-2.5 space-y-2" onMouseDown={(e) => e.stopPropagation()}>
-        {/* 模型选择 */}
+        {/* 模型 TAB 切换(对应主项目 gpt-image-2-web Tab 0/1/2) */}
         <div>
           <label className="text-[10px] text-white/50 block mb-1">模型</label>
-          <select
-            value={model}
-            onChange={(e) => update({ model: e.target.value })}
-            className="w-full rounded bg-white/5 border border-white/10 px-2 py-1 text-xs text-white outline-none focus:border-white/30"
+          <div
+            className={`flex gap-0.5 p-0.5 rounded ${isPixel ? '' : 'bg-white/5'}`}
+            style={isPixel ? { background: 'var(--px-muted)', border: '1.5px solid var(--px-ink)' } : undefined}
           >
-            {IMAGE_MODELS.map((m) => (
-              <option key={m.id} value={m.id} className="bg-zinc-900">
-                {m.label}
-              </option>
-            ))}
-          </select>
+            {IMAGE_MODELS.map((m) => {
+              const isActive = m.id === model;
+              const tabLabel = MODEL_TAB_LABELS[m.id] || m.label;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => update({ model: m.id, size: m.defaultSize })}
+                  title={m.description}
+                  className={`flex-1 py-1 text-[10px] font-semibold rounded transition-all ${
+                    isActive
+                      ? 'bg-amber-500/30 text-amber-200'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                  style={
+                    isPixel && isActive
+                      ? {
+                          background: 'var(--px-yellow)',
+                          color: 'var(--px-ink)',
+                          border: '1.5px solid var(--px-ink)',
+                          boxShadow: '1px 1px 0 var(--px-ink)',
+                        }
+                      : isPixel
+                        ? { color: 'var(--px-ink-soft)' }
+                        : undefined
+                  }
+                >
+                  {tabLabel}
+                </button>
+              );
+            })}
+          </div>
         </div>
         {/* 尺寸 */}
         <div>
