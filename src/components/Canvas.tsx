@@ -177,6 +177,15 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
     handleType: 'source' | 'target';
   } | null>(null);
 
+  // ===== SHIFT+拖拽 Handle 批量移线 =====
+  // 按住 SHIFT 从节点入口(target handle)拖出，可一次性把所有入边移到另一个节点的入口。
+  // 同理也支持从 source handle SHIFT+拖拽移动所有出边。
+  const bulkReconnectRef = useRef<{
+    fromNodeId: string;
+    handleType: 'source' | 'target';
+    edges: Edge[];
+  } | null>(null);
+
   // 吸附 + 对齐辅助线
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [guides, setGuides] = useState<{ vertical: number[]; horizontal: number[] }>({
@@ -860,6 +869,8 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   );
   const onConnect = useCallback(
     (params: Connection) => {
+      // 批量移线过程中禁止普通连接逻辑(不然会多一条重复边)
+      if (bulkReconnectRef.current) return;
       // 连接有效性校验(防止绕过 isValidConnection 的底层调用)
       const src = nodes.find((n) => n.id === params.source);
       const tgt = nodes.find((n) => n.id === params.target);
@@ -898,14 +909,113 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
     (_e: any, params: { nodeId: string | null; handleType: 'source' | 'target' | null }) => {
       if (!params.nodeId || !params.handleType) return;
       connectingFromRef.current = { nodeId: params.nodeId, handleType: params.handleType };
+
+      // SHIFT + target handle → 批量移动所有入边
+      const evt = _e as MouseEvent;
+      if (evt.shiftKey) {
+        if (params.handleType === 'target') {
+          const incoming = edges.filter((e) => e.target === params.nodeId);
+          if (incoming.length > 0) {
+            bulkReconnectRef.current = {
+              fromNodeId: params.nodeId,
+              handleType: 'target',
+              edges: JSON.parse(JSON.stringify(incoming)),
+            };
+          }
+        } else if (params.handleType === 'source') {
+          const outgoing = edges.filter((e) => e.source === params.nodeId);
+          if (outgoing.length > 0) {
+            bulkReconnectRef.current = {
+              fromNodeId: params.nodeId,
+              handleType: 'source',
+              edges: JSON.parse(JSON.stringify(outgoing)),
+            };
+          }
+        }
+      }
     },
-    []
+    [edges]
   );
 
   const onConnectEnd = useCallback(
     (event: MouseEvent | TouchEvent) => {
       const from = connectingFromRef.current;
       connectingFromRef.current = null;
+
+      // ===== SHIFT+批量移线处理 =====
+      if (bulkReconnectRef.current) {
+        const bulk = bulkReconnectRef.current;
+        bulkReconnectRef.current = null;
+
+        const targetEl = event.target as HTMLElement | null;
+        if (!targetEl) return;
+        // 检测是否释放在一个 Handle 上
+        const handleEl = targetEl.closest('.react-flow__handle') as HTMLElement | null;
+        if (handleEl) {
+          const newNodeId =
+            handleEl.getAttribute('data-nodeid') ||
+            handleEl.closest('.react-flow__node')?.getAttribute('data-id') ||
+            '';
+          const dropHandleType = handleEl.getAttribute('data-handletype'); // 'source' | 'target'
+
+          if (newNodeId && newNodeId !== bulk.fromNodeId) {
+            // 入口→入口: 所有入边的 target 改为新节点
+            if (bulk.handleType === 'target' && dropHandleType === 'target') {
+              const bulkIds = new Set(bulk.edges.map((e) => e.id));
+              setEdges((eds) => {
+                const filtered = eds.filter((e) => !bulkIds.has(e.id));
+                const newTarget = nodes.find((n) => n.id === newNodeId);
+                const newEdges = bulk.edges.map((old) => {
+                  const srcNode = nodes.find((n) => n.id === old.source);
+                  const outs = srcNode ? getNodeOutputs(srcNode) : [];
+                  const ins = newTarget ? getNodeInputs(newTarget) : [];
+                  const matched = outs.find((o) => ins.includes(o) || o === 'any' || ins.includes('any'));
+                  const color = matched && matched !== 'any' ? PORT_COLOR[matched] : undefined;
+                  return {
+                    ...old,
+                    id: `e-${old.source}-${newNodeId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    target: newNodeId,
+                    targetHandle: null,
+                    ...(color ? { style: { stroke: color, strokeWidth: 2 } } : {}),
+                    data: { ...((old.data as any) || {}), portType: matched ?? 'any' },
+                  };
+                });
+                return [...filtered, ...newEdges];
+              });
+              return;
+            }
+            // 出口→出口: 所有出边的 source 改为新节点
+            if (bulk.handleType === 'source' && dropHandleType === 'source') {
+              const bulkIds = new Set(bulk.edges.map((e) => e.id));
+              setEdges((eds) => {
+                const filtered = eds.filter((e) => !bulkIds.has(e.id));
+                const newSource = nodes.find((n) => n.id === newNodeId);
+                const newEdges = bulk.edges.map((old) => {
+                  const tgtNode = nodes.find((n) => n.id === old.target);
+                  const outs = newSource ? getNodeOutputs(newSource) : [];
+                  const ins = tgtNode ? getNodeInputs(tgtNode) : [];
+                  const matched = outs.find((o) => ins.includes(o) || o === 'any' || ins.includes('any'));
+                  const color = matched && matched !== 'any' ? PORT_COLOR[matched] : undefined;
+                  return {
+                    ...old,
+                    id: `e-${newNodeId}-${old.target}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                    source: newNodeId,
+                    sourceHandle: null,
+                    ...(color ? { style: { stroke: color, strokeWidth: 2 } } : {}),
+                    data: { ...((old.data as any) || {}), portType: matched ?? 'any' },
+                  };
+                });
+                return [...filtered, ...newEdges];
+              });
+              return;
+            }
+          }
+        }
+        // 释放在其他位置 → 取消，边不变
+        return;
+      }
+
+      // ===== 普通拖线逻辑 =====
       if (!from) return;
       // 终点是否落在 Handle / 节点 / 连线上:任何一项命中都交给 ReactFlow 默认连接逻辑处理,不弹出候选菜单
       // 仅当鼠标释放在“空白画布”(pane / background 本体或其隔层子)时才弹菜单
@@ -929,7 +1039,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
         screenPos: { x: clientX, y: clientY },
       });
     },
-    [screenToFlowPosition]
+    [screenToFlowPosition, nodes]
   );
 
   // 计算候选节点列表(根据起始节点输出/输入类型过滤)
