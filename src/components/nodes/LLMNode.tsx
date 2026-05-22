@@ -592,37 +592,41 @@ const LLMNode = ({ id, data, selected }: NodeProps) => {
     {hasChat && (
       <div
         ref={chatRef}
-        className={`llm-chat-panel w-[260px] rounded-xl border-2 overflow-y-auto pl-2.5 pt-2.5 pb-2.5 pr-0 space-y-1.5 ${
+        className={`llm-chat-panel w-[260px] rounded-xl border-2 pl-2.5 pt-2.5 pb-2.5 pr-0 ${
+          editingIdx !== null ? 'flex flex-col' : 'overflow-y-auto space-y-1.5'
+        } ${
           selected ? 'border-emerald-400/60' : 'border-white/10'
         }`}
         style={{ background: 'rgba(20,20,22,.94)', height: mainH ? `${mainH}px` : undefined }}
         onMouseDown={(e) => e.stopPropagation()}
       >
+        {editingIdx !== null ? (
+          /* 编辑模式：textarea 擑满整个面板，高度严格等于左侧节点 */
+          <textarea
+            autoFocus
+            value={editText}
+            onChange={(e) => setEditText(e.target.value)}
+            onBlur={handleEditBlur}
+            onKeyDown={handleEditKeyDown}
+            className="w-full flex-1 resize-none rounded bg-white/10 border border-emerald-400/50 px-2 py-1.5 text-[11px] text-white outline-none focus:border-emerald-400 overflow-y-auto"
+          />
+        ) : (
+          /* 正常展示模式 */
+          <>
         {history.map((t, i) => (
           <div key={i} className="text-[11px]">
             <div className={`text-[9px] mb-0.5 ${t.role === 'user' ? 'text-sky-300/60' : 'text-emerald-300/60'}`}>
               {t.role === 'user' ? '🧑 用户' : '🤖 助手'}
               {t.role === 'assistant' && <span className="text-white/30 ml-1">(双击编辑)</span>}
             </div>
-            {editingIdx === i ? (
-              <textarea
-                autoFocus
-                value={editText}
-                onChange={(e) => setEditText(e.target.value)}
-                onBlur={handleEditBlur}
-                onKeyDown={handleEditKeyDown}
-                className="w-full h-full min-h-[100px] resize-none rounded bg-white/10 border border-emerald-400/50 px-2 py-1.5 text-[11px] text-white outline-none focus:border-emerald-400 overflow-y-auto"
-              />
-            ) : (
-              <div
-                onDoubleClick={() => handleDoubleClickMsg(i)}
-                className={`whitespace-pre-wrap text-white/80 bg-white/[0.03] rounded p-1.5 ${
-                  t.role === 'assistant' ? 'cursor-pointer hover:bg-white/[0.06] transition-colors' : ''
-                }`}
-              >
-                {t.text || '[空]'}
-              </div>
-            )}
+            <div
+              onDoubleClick={() => handleDoubleClickMsg(i)}
+              className={`whitespace-pre-wrap text-white/80 bg-white/[0.03] rounded p-1.5 ${
+                t.role === 'assistant' ? 'cursor-pointer hover:bg-white/[0.06] transition-colors' : ''
+              }`}
+            >
+              {t.text || '[空]'}
+            </div>
             {t.images && t.images.length > 0 && (
               <div className="flex gap-1 flex-wrap mt-1">
                 {t.images.map((u, j) => (
@@ -639,6 +643,8 @@ const LLMNode = ({ id, data, selected }: NodeProps) => {
               {streamingText}
             </div>
           </div>
+        )}
+          </>
         )}
       </div>
     )}

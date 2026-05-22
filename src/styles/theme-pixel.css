@@ -297,8 +297,8 @@ html[data-theme-style="pixel"] .react-flow__node-llm .llm-chat-panel {
   backdrop-filter: none !important;
   color: var(--px-ink) !important;
 }
-/* LLM 节点主体面板(像素风适配 —— flex wrapper 下的子 div) */
-html[data-theme-style="pixel"] .react-flow__node-llm > div:first-child > div {
+/* LLM 节点主体面板(像素风适配 —— flex wrapper 下的子 div，排除 Handle) */
+html[data-theme-style="pixel"] .react-flow__node-llm > div:first-child > div:not(.react-flow__handle) {
   background: var(--px-surface) !important;
   background-color: var(--px-surface) !important;
   background-image: none !important;
