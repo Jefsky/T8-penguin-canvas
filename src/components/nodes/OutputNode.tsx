@@ -1,5 +1,5 @@
 import { memo, useMemo, useRef, useState } from 'react';
-import { Handle, Position, useReactFlow, useStore, type NodeProps } from '@xyflow/react';
+import { Handle, Position, useReactFlow, type NodeProps } from '@xyflow/react';
 import { MonitorPlay, Type as TypeIcon, Image as ImageIcon, Video as VideoIcon, Music, Download, Pencil, Check } from 'lucide-react';
 import { useUpdateNodeData } from './useUpdateNodeData';
 import { useThemeStore } from '../../stores/theme';
@@ -38,29 +38,10 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
   const isDark = theme === 'dark';
   const d = (data as any) || {};
 
-  // 订阅 xyflow store 中的上游签名: 上游 data 变化时本节点重新计算
-  // 用 useStore + 自定义 selector,只在签名字符串变化时触发重渲染,避免循环
-  const upstreamSignature = useStore((s: any) => {
-    try {
-      const edgesArr: any[] = Array.from(s.edges?.values?.() ?? s.edges ?? []);
-      const nodesMap: Map<string, any> = s.nodeLookup || new Map();
-      const sources = edgesArr.filter((e) => e.target === id).map((e) => e.source);
-      const parts: string[] = [];
-      for (const sid of sources) {
-        const n = nodesMap.get(sid);
-        const ud = n?.data || n?.internals?.userNode?.data || {};
-        parts.push(
-          `${sid}|${ud.imageUrl || ''}|${(ud.imageUrls || []).length}|${ud.videoUrl || ''}|${ud.audioUrl || ''}|${(ud.reply || ud.prompt || ud.text || '').slice(0, 80)}`
-        );
-      }
-      return parts.join('::');
-    } catch {
-      return '';
-    }
-  });
-
+  // 对齐 VideoOutputNode 的做法：在 useMemo 里调 getEdges()/getNodes() 读一次,
+  // xyflow 在任何节点 data 变化都会重渲染可见节点,这里就会重算。
+  // d 作为依赖之一以保证本节点 data 变化也能刷新(如 outputText)。
   const collected = useMemo<Collected>(() => {
-    void upstreamSignature; // 触发重新计算
     const edges = getEdges();
     const nodes = getNodes();
     const upstreamIds = edges.filter((e) => e.target === id).map((e) => e.source);
@@ -113,7 +94,7 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
     });
 
     return out;
-  }, [id, getEdges, getNodes, upstreamSignature]);
+  }, [id, getEdges, getNodes, d]);
 
   // 文本编辑
   const overrideText: string = typeof d.outputText === 'string' ? d.outputText : '';

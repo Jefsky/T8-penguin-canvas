@@ -5,6 +5,7 @@ import { useApiKeysStore } from './stores/apiKeys';
 import Sidebar from './components/Sidebar';
 import Canvas from './components/Canvas';
 import ApiSettingsModal from './components/ApiSettings';
+import ErrorBoundary from './components/ErrorBoundary';
 import * as api from './services/api';
 import type { NodeType } from './types/canvas';
 
@@ -196,7 +197,9 @@ function App() {
       {/* 主体两栏布局 */}
       <div className="flex-1 flex overflow-hidden">
         <Sidebar onAddNode={handleAddNode} />
-        <Canvas onAddNodeRef={addNodeRef} />
+        <ErrorBoundary fallbackTitle="画布渲染出错了，已被错误边界捕获">
+          <Canvas onAddNodeRef={addNodeRef} />
+        </ErrorBoundary>
       </div>
 
       {/* API 设置弹窗 */}
