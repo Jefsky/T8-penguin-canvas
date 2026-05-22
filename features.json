@@ -1,7 +1,7 @@
 {
   "$schema": "本文件为 T8-penguin-canvas 节点清单防丢失锁,任何节点删减都需要在 roadmap.md 中说明并更新本文件。",
   "version": "1.1.0",
-  "lastUpdated": "2026-05-21",
+  "lastUpdated": "2026-05-22",
   "layout": {
     "mode": "single-column-sidebar",
     "description": "画布管理 + 节点列表合并为一列 Sidebar，主体变为两栏布局(Sidebar + Canvas)，紧凑化节省约 96px 横向空间。",
@@ -80,7 +80,7 @@
         { "type": "image", "label": "图像生成节点(ZhenzhenMagic)", "description": "多 TAB 模型切换:GPT Image 2 / Nano Banana Pro / Nano Banana 2,对应主项目 gpt-image-2-web Tab 0/1/2" },
         { "type": "video", "label": "视频节点", "description": "veo-3.1 / grok-video" },
         { "type": "seedance", "label": "SD2.0 节点", "description": "Seedance 2.0 视频分镜" },
-        { "type": "audio", "label": "音频节点", "description": "🆕 Suno V5.5(generate / cover / extend),全模式" },
+        { "type": "audio", "label": "音频节点", "description": "Suno 全对齐 gpt-image-2-web:三模式(generate/cover/extend) + 7 版本(v3.0/v3.5/v4/v4.5/v4.5+/v5/v5.5) + 本地上传 + 上游 audioUrl 兜底,无 FAL" },
         { "type": "llm", "label": "LLM/Vision 节点", "description": "gpt-5 / claude-4.5 / gemini-2.5,使用独立 LLM Key" }
       ]
     },
@@ -181,9 +181,9 @@
       { "id": "seedance-2.0", "label": "Seedance 2.0(SD2.0)", "provider": "zhenzhen", "endpoint": "/v1/videos/seedance" }
     ],
     "audio": [
-      { "id": "suno-v5.5-generate", "label": "Suno V5.5 生成", "provider": "zhenzhen", "endpoint": "/v1/audio/suno/generate" },
-      { "id": "suno-v5.5-cover", "label": "Suno V5.5 翻唱", "provider": "zhenzhen", "endpoint": "/v1/audio/suno/cover" },
-      { "id": "suno-v5.5-extend", "label": "Suno V5.5 续写", "provider": "zhenzhen", "endpoint": "/v1/audio/suno/extend" }
+      { "id": "suno-generate", "label": "Suno 生成", "provider": "zhenzhen", "endpoint": "/suno/generate", "versions": ["v3.0","v3.5","v4","v4.5","v4.5+","v5","v5.5"] },
+      { "id": "suno-cover", "label": "Suno 翻唱", "provider": "zhenzhen", "endpoint": "/suno/submit/music", "versions": ["v3.0","v3.5","v4","v4.5","v4.5+","v5","v5.5"] },
+      { "id": "suno-extend", "label": "Suno 续写", "provider": "zhenzhen", "endpoint": "/suno/generate", "versions": ["v3.0","v3.5","v4","v4.5","v4.5+","v5","v5.5"] }
     ],
     "llm": [
       { "id": "gpt-5", "label": "GPT-5", "provider": "llm-direct", "endpoint": "/v1/chat/completions" },
@@ -249,8 +249,9 @@
         "POST /api/proxy/llm — LLM Chat(独立 Key)",
         "POST /api/proxy/video/submit — 视频任务提交",
         "GET /api/proxy/video/query?taskId — 视频任务轮询(转存)",
-        "POST /api/proxy/audio/submit — Suno 提交(generate/cover/extend)",
-        "GET /api/proxy/audio/query?clipIds — Suno 轮询",
+        "POST /api/proxy/audio/submit — Suno 提交(generate/cover/extend, 7 版本 MV 映射)",
+        "GET /api/proxy/audio/query?clipIds&saveLocal — Suno 轮询(saveLocal=true 时转存到本地, tracks 含 clipId+remoteUrl+audioUrl)",
+        "POST /api/proxy/audio/upload — Suno 本地音频上传(multer + 5 步上传链 init→S3→finish→轮询→initialize-clip, 返回 clipId)",
         "POST /api/proxy/runninghub/submit — RH 工作流提交",
         "GET /api/proxy/runninghub/query?taskId — RH 任务轮询(转存)",
         "GET /api/proxy/runninghub/app-info?webappId — RH 应用信息"

@@ -323,6 +323,19 @@ export const AUDIO_MODELS: AudioModelDef[] = [
   { id: 'suno-v5.5-extend', label: 'Suno V5.5 续写', provider: 'zhenzhen', mode: 'extend' },
 ];
 
+// Suno 版本下拉选项（完全对齐主项目 gpt-image-2-web 的 SUNO_MV_MAP）。
+// value 将被原样发送给后端。
+export const SUNO_VERSIONS: Array<{ value: string; label: string }> = [
+  { value: 'v3.0', label: 'v3.0' },
+  { value: 'v3.5', label: 'v3.5' },
+  { value: 'v4', label: 'v4' },
+  { value: 'v4.5', label: 'v4.5' },
+  { value: 'v4.5+', label: 'v4.5+' },
+  { value: 'v5', label: 'v5' },
+  { value: 'v5.5', label: 'v5.5' },
+];
+export const DEFAULT_SUNO_VERSION = 'v5.5';
+
 // ========== LLM/Vision ==========
 export interface LlmModelDef {
   id: string;

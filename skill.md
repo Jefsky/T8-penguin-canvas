@@ -685,6 +685,75 @@ export interface FalSubmitRequest {
 
 ---
 
+### 11.9 音频节点对齐（Suno 三模式·无 FAL）
+
+本小节专门描述如何对齐主项目 `gpt-image-2-web/index.html` 的 Suno 实现。
+**注意：本项目的 audio 节点不提供 FAL 模式**，仅走贞贞工坊 Suno 渠道。
+
+#### 11.9.1 三个起点函数（主项目可查行号）
+
+| 实现 | 主项目函数 | 起始行 | 上游接口 |
+| --- | --- | --- | --- |
+| 生成（generate） | `runSuno` | L3979 | `POST /suno/generate` |
+| 翻唱（cover） | `runSunoCover` | L4282 | `POST /suno/submit/music` (task=cover) |
+| 续写（extend） | `runSunoExtend` | L4313 | `POST /suno/generate` (task=upload_extend) |
+| 轮询 | `pollSuno` | L4015 | `GET /suno/feed/{clipIds}` |
+| 本地上传 | `_sunoUploadAudio` | L4210 | 5 步：`/suno/uploads/audio` (init/finish/status/initialize-clip) + S3 |
+
+#### 11.9.2 SUNO_MV_MAP 标准映射（8 者一致）
+
+主项目 `index.html L3977` 与本项目后端 [proxy.js](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/routes/proxy.js) 以及前端 [models.ts](file:///e:/PenguinPravite/T8-penguin-canvas/src/providers/models.ts) `SUNO_VERSIONS` 必须保持严格一致：
+
+```js
+{ 'v3.0':'chirp-v3.0', 'v3.5':'chirp-v3.5', 'v4':'chirp-v4',
+  'v4.5':'chirp-auk', 'v4.5+':'chirp-bluejay', 'v5':'chirp-crow', 'v5.5':'chirp-fenix' }
+```
+
+后端 `resolveSunoMv()` 同时兼容带 `suno-` 前缀的旧调用方（如 `'suno-v5.5'`）只需 `String(version).replace(/^suno-/i,'')` 后查表。
+
+#### 11.9.3 后端三条路由
+
+| 路由 | 说明 |
+| --- | --- |
+| `POST /api/proxy/audio/submit` | body `{ mode, prompt, title, tags, version, seed?, cover_clip_id?, continue_clip_id?, continue_at? }`。cover 响应同时兼容 `code:'success'+data:taskId(string)` 与 `result.id+result.clips`。 |
+| `GET  /api/proxy/audio/query?clipIds=&saveLocal=` | 调用上游 `/suno/feed/{ids}`；completed 轨面返回 `{ id, clipId, audioUrl(本地), remoteUrl(原始), imageUrl, title, tags, duration }`。默认 `saveLocal=true` 转存到 `output/audio_*.mp3`。 |
+| `POST /api/proxy/audio/upload` | 中间件 `multer.single('file')` 内存接取多部分表单；服务器端 **原生 Node 18+ FormData/Blob** 代理主项目 `_sunoUploadAudio` 5 步流程，返回 `{ clipId, uploadId, filename, size, mime }`。 |
+
+#### 11.9.4 前端 AudioNode 执行范式
+
+[AudioNode](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/AudioNode.tsx) 严格遵循§11.3 执行范式：
+
+1. **mode/version 下拉** — 使用 [SUNO_VERSIONS](file:///e:/PenguinPravite/T8-penguin-canvas/src/providers/models.ts)。默认 `v5.5`。
+2. **上游采集** — `collectUpstream()` 同时拾取 `prompt` 与 `audioUrl`；后者作为 cover/extend 的报底参考音频。
+3. **本地上传** — `<input type="file" accept="audio/*">` → `uploadAudioForSuno(file)` → 持久化到 `data.uploadedClipId / uploadedFilename`。
+4. **起动** — cover/extend 优先用 `uploadedClipId`；没有但上游有 `audioUrl` 时，节点会在提交前 **自动 fetch URL → File → uploadAudioForSuno** 拿到 clipId。
+5. **轮询** — 3000ms × 60 次（3 分钟）与主项目默认 `pollInt=3 / maxPoll=60` 对齐。
+6. **输出** — `data.audioUrl = tracks[0].audioUrl`（主轨），`data.tracks[]` 保留双轨供页面展示。`PORT_COLOR.audio` (`#c4b5fd`) 驱动港 Handle 颜色。
+7. **总线接入** — [`useRunTrigger`](file:///e:/PenguinPravite/T8-penguin-canvas/src/hooks/useRunTrigger.ts) 进入批量运行调度；轮询中不重复唤起。
+
+#### 11.9.5 轮询与转存
+
+* `queryAudio(clipIds, saveLocal=true)` 默认让后端 ·11.2 转存到 `OUTPUT_DIR/audio_*.mp3`，同时返回 `remoteUrl` 供需要原始 URL 的消费者。
+* 重复 URL 检测：主项目 `pollSuno` L4057 对两轨同 URL 会重拉。后端未复现此逻辑，如需请在上游拉升轮询次数。
+
+#### 11.9.6 代码定位索引
+
+* 后端路由源：[proxy.js · 音频生成节](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/routes/proxy.js)（搜 `SUNO_MV_MAP` / `/audio/upload`）。
+* 前端服务封装：[generation.ts · audio 部分](file:///e:/PenguinPravite/T8-penguin-canvas/src/services/generation.ts)（`submitAudio` / `queryAudio` / `uploadAudioForSuno`）。
+* 节点组件：[AudioNode.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/AudioNode.tsx)。
+* 初始 data：[Canvas.tsx INITIAL_DATA.audio](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/Canvas.tsx)（默认 `mode='generate' / version='v5.5' / continueAt=28`）。
+
+#### 11.9.7 常见坑
+
+| 坑 | 现象 | 防御 |
+| --- | --- | --- |
+| 后端多部分表单未启用 multer | `req.file` 为 undefined | `audioUpload.single('file')` 中间件必需；文件字段名严格 `file` |
+| Cover 响应双格式 | 走 `code:'success'` 拿不到 clipIds | 后端 ·11.9.3 同时兼容 `Array.isArray(data.data)` / `result.clips` 两路径 |
+| `'suno-v5.5'` 传入后端 → 查不到 mv | 返回退化 `chirp-fenix` | `resolveSunoMv` 手动 `replace(/^suno-/i,'')` |
+| Node 原生 FormData/Blob | 某些环境优先装了 `form-data` 包会覆盖 | 该项目 `package.json` 未装 `form-data`，依赖 Node 18+ 全局 |
+
+---
+
 ## 12. 日志总线 / 终端面板规范
 
 ### 12.1 logBus

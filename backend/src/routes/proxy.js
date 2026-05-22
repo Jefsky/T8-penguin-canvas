@@ -7,10 +7,14 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const multer = require('multer');
 const config = require('../config');
 const { getWhitePng } = require('../utils/whitePng');
 
 const router = express.Router();
+
+// 音频文件上传中间件(内存存储, 50MB)
+const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 // ========== 工具:加载 Settings 明文 ==========
 function loadRawSettings() {
@@ -35,6 +39,23 @@ async function saveRemoteImage(url) {
     return `/files/output/${filename}`;
   } catch (e) {
     console.error('⚠ 转存图像失败:', e.message);
+    return url; // 退化:返回原 URL
+  }
+}
+
+// ========== 工具:保存上游返回的音频到本地 ==========
+async function saveRemoteAudio(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`下载失败: ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    const ext = (url.match(/\.(mp3|wav|m4a|ogg|flac|aac)/i)?.[1] || 'mp3').toLowerCase();
+    const filename = `audio_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+    const filePath = path.join(config.OUTPUT_DIR, filename);
+    fs.writeFileSync(filePath, buf);
+    return `/files/output/${filename}`;
+  } catch (e) {
+    console.error('⚠ 转存音频失败:', e.message);
     return url; // 退化:返回原 URL
   }
 }
@@ -1327,15 +1348,25 @@ router.get('/seedance/query', async (req, res) => {
 
 // ========================================================================
 // 音频生成(Suno - 异步)
-// 协议(贞贞工坊):POST /suno/generate + GET /suno/feed/:clipIds
+// 协议(贞贞工坊):POST /suno/generate + GET /suno/feed/:clipIds + POST /suno/submit/music
 // 模式:generate / cover / extend
+// 严格对齐主项目 gpt-image-2-web 的 SUNO_MV_MAP (7 个版本)
 // ========================================================================
 const SUNO_MV_MAP = {
-  'suno-v5.5': 'chirp-fenix',
-  'suno-v5': 'chirp-v3-5',
-  'suno-v4.5': 'chirp-v4-5',
-  'suno-v4': 'chirp-v4',
+  'v3.0': 'chirp-v3.0',
+  'v3.5': 'chirp-v3.5',
+  'v4': 'chirp-v4',
+  'v4.5': 'chirp-auk',
+  'v4.5+': 'chirp-bluejay',
+  'v5': 'chirp-crow',
+  'v5.5': 'chirp-fenix',
 };
+
+// 兼容带 'suno-' 前缀的旧调用方 (如 'suno-v5.5')
+function resolveSunoMv(version) {
+  const v = String(version || 'v5.5').replace(/^suno-/i, '');
+  return SUNO_MV_MAP[v] || 'chirp-fenix';
+}
 
 router.post('/audio/submit', async (req, res) => {
   const settings = loadRawSettings();
@@ -1347,7 +1378,7 @@ router.post('/audio/submit', async (req, res) => {
   if (!prompt && m !== 'extend') {
     return res.status(400).json({ success: false, error: 'prompt 必填' });
   }
-  const mv = SUNO_MV_MAP[version || 'suno-v5.5'] || 'chirp-fenix';
+  const mv = resolveSunoMv(version);
   const auth = { Authorization: `Bearer ${settings.zhenzhenApiKey}`, 'Content-Type': 'application/json' };
   try {
     if (m === 'generate') {
@@ -1405,6 +1436,8 @@ router.get('/audio/query', async (req, res) => {
   if (!settings?.zhenzhenApiKey) return res.status(400).json({ success: false, error: '未配置贞贞工坊 API Key' });
   const ids = String(req.query.clipIds || req.query.taskId || '').trim();
   if (!ids) return res.status(400).json({ success: false, error: 'clipIds 或 taskId 必填' });
+  // 是否将完成的音频转存到本地 output 目录(默认 true)
+  const saveLocal = String(req.query.saveLocal ?? 'true').toLowerCase() !== 'false';
   try {
     const r = await fetch(`${config.ZHENZHEN_BASE_URL}/suno/feed/${encodeURIComponent(ids)}`, {
       headers: { Authorization: `Bearer ${settings.zhenzhenApiKey}` },
@@ -1416,9 +1449,13 @@ router.get('/audio/query', async (req, res) => {
     const tracks = [];
     for (const c of clips) {
       if (c?.status === 'complete' && c?.audio_url) {
+        const remoteUrl = c.audio_url;
+        const localUrl = saveLocal ? await saveRemoteAudio(remoteUrl) : remoteUrl;
         tracks.push({
           id: c.id || c.clip_id,
-          audioUrl: c.audio_url,
+          clipId: c.clip_id || c.id,
+          audioUrl: localUrl,
+          remoteUrl,
           imageUrl: c.image_large_url || c.image_url || '',
           title: c.title || '',
           tags: c.tags || '',
@@ -1439,6 +1476,94 @@ router.get('/audio/query', async (req, res) => {
     });
   } catch (e) {
     console.error('proxy/audio/query 错误:', e);
+    res.status(500).json({ success: false, error: e.message || '请求失败' });
+  }
+});
+
+// ========================================================================
+// 音频上传 (Suno cover/extend 使用)
+// 完全对齐主项目 gpt-image-2-web 的 _sunoUploadAudio 5 步流程:
+// 1) POST /suno/uploads/audio { extension }  -> { id, url, fields? }
+// 2) S3 上传: 有 fields 走 POST FormData / 无 fields 走 PUT 预签 URL
+// 3) POST /suno/uploads/audio/{id}/upload-finish { upload_type, upload_filename }
+// 4) GET /suno/uploads/audio/{id} 轮询 30 × 2s 直到 status='complete'
+// 5) POST /suno/uploads/audio/{id}/initialize-clip {} -> { clip_id }
+// ========================================================================
+router.post('/audio/upload', audioUpload.single('file'), async (req, res) => {
+  const settings = loadRawSettings();
+  if (!settings?.zhenzhenApiKey) return res.status(400).json({ success: false, error: '未配置贞贞工坊 API Key' });
+  if (!req.file) return res.status(400).json({ success: false, error: '未接收到音频文件 (field=file)' });
+  const apiKey = settings.zhenzhenApiKey;
+  const baseUrl = config.ZHENZHEN_BASE_URL;
+  const audioBuf = req.file.buffer;
+  const filename = req.file.originalname || 'audio.mp3';
+  const ext = (filename.split('.').pop() || 'mp3').toLowerCase();
+  const mimeMap = { mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', ogg: 'audio/ogg', flac: 'audio/flac', aac: 'audio/aac', wma: 'audio/x-ms-wma' };
+  const ct = mimeMap[ext] || req.file.mimetype || 'audio/mpeg';
+  try {
+    // 1) init
+    const r1 = await fetch(`${baseUrl}/suno/uploads/audio`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ extension: ext }),
+    });
+    if (!r1.ok) return res.status(r1.status).json({ success: false, error: `Upload init failed: ${r1.status} ${await r1.text()}` });
+    const r1Json = await r1.json();
+    const upData = (r1Json.code && r1Json.data) ? r1Json.data : r1Json;
+    const uploadId = upData.id;
+    const uploadUrl = upData.url;
+    const fields = upData.fields;
+    if (!uploadId || !uploadUrl) return res.status(500).json({ success: false, error: 'Upload init 返回无效: missing id/url' });
+    // 2) S3 upload
+    let r2;
+    if (fields && Object.keys(fields).length > 0) {
+      const fd = new FormData();
+      Object.keys(fields).forEach((k) => fd.append(k, fields[k]));
+      fd.append('file', new Blob([audioBuf], { type: ct }), filename);
+      r2 = await fetch(uploadUrl, { method: 'POST', body: fd });
+    } else {
+      r2 = await fetch(uploadUrl, { method: 'PUT', body: audioBuf, headers: { 'Content-Type': ct } });
+    }
+    if (r2.status !== 204 && r2.status !== 200 && !r2.ok) {
+      return res.status(500).json({ success: false, error: `S3 upload failed: ${r2.status}` });
+    }
+    // 3) finish
+    const r3 = await fetch(`${baseUrl}/suno/uploads/audio/${uploadId}/upload-finish`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ upload_type: 'file_upload', upload_filename: filename }),
+    });
+    if (!r3.ok) return res.status(500).json({ success: false, error: `Upload finish failed: ${r3.status} ${await r3.text()}` });
+    // 4) poll status
+    let clipId = '';
+    for (let i = 0; i < 30; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const sr = await fetch(`${baseUrl}/suno/uploads/audio/${uploadId}`, { headers: { Authorization: `Bearer ${apiKey}` } });
+      if (!sr.ok) continue;
+      const srJson = await sr.json();
+      const sd = (srJson.code && srJson.data) ? srJson.data : srJson;
+      const st = sd.status || sd.state || '';
+      if (st === 'complete') {
+        // 5) initialize-clip
+        const r4 = await fetch(`${baseUrl}/suno/uploads/audio/${uploadId}/initialize-clip`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!r4.ok) return res.status(500).json({ success: false, error: `Initialize clip failed: ${r4.status} ${await r4.text()}` });
+        const r4Json = await r4.json();
+        const initData = (r4Json.code && r4Json.data) ? r4Json.data : r4Json;
+        clipId = initData.clip_id || initData.id || '';
+        break;
+      } else if (st === 'failed' || st === 'error') {
+        const errMsg = sd.error_message || sd.error || sd.detail || sd.message || st;
+        return res.status(500).json({ success: false, error: `音频处理失败: ${errMsg}` });
+      }
+    }
+    if (!clipId) return res.status(504).json({ success: false, error: 'Upload timeout - no clip_id (60s)' });
+    return res.json({ success: true, data: { clipId, uploadId, filename, size: req.file.size, mime: ct } });
+  } catch (e) {
+    console.error('proxy/audio/upload 错误:', e);
     res.status(500).json({ success: false, error: e.message || '请求失败' });
   }
 });

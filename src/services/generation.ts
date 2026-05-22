@@ -390,6 +390,7 @@ export async function querySeedance(taskId: string): Promise<SeedanceQueryResult
 
 // ========================================================================
 // 音频 Suno(异步)
+// 完全对齐主项目 gpt-image-2-web 的 runSuno / runSunoCover / runSunoExtend
 // ========================================================================
 export type AudioMode = 'generate' | 'cover' | 'extend';
 export interface AudioSubmitRequest {
@@ -397,7 +398,11 @@ export interface AudioSubmitRequest {
   prompt?: string;
   title?: string;
   tags?: string;
-  version?: string; // suno-v5.5 等
+  /**
+   * Suno 版本号：推荐传主项目原始值 (v3.0 / v3.5 / v4 / v4.5 / v4.5+ / v5 / v5.5)。
+   * 后端 resolveSunoMv() 同时兼容带 'suno-' 前缀的旧调用方 (如 'suno-v5.5')。
+   */
+  version?: string;
   seed?: number;
   continue_clip_id?: string;
   continue_at?: number;
@@ -419,7 +424,10 @@ export async function submitAudio(
 
 export interface AudioTrack {
   id: string;
+  clipId?: string;
   audioUrl: string;
+  /** 上游原始 URL（后端 saveLocal=true 时同时返回） */
+  remoteUrl?: string;
   imageUrl?: string;
   title?: string;
   tags?: string;
@@ -432,9 +440,30 @@ export interface AudioQueryResult {
   completed: number;
 }
 
-export async function queryAudio(clipIds: string[]): Promise<AudioQueryResult> {
+/**
+ * 轮询 Suno feed。
+ * @param clipIds 任务中的 clip id 列表
+ * @param saveLocal 是否让后端将完成的音频转存到本地 output（默认 true）
+ */
+export async function queryAudio(clipIds: string[], saveLocal: boolean = true): Promise<AudioQueryResult> {
   const ids = clipIds.join(',');
-  const r = await fetch(`/api/proxy/audio/query?clipIds=${encodeURIComponent(ids)}`);
+  const params = new URLSearchParams({ clipIds: ids, saveLocal: String(saveLocal) });
+  const r = await fetch(`/api/proxy/audio/query?${params.toString()}`);
+  const data = await r.json();
+  if (!r.ok || !data.success) throw new Error(data?.error || `HTTP ${r.status}`);
+  return data.data;
+}
+
+/**
+ * 将本地音频上传给 Suno 并获取 clipId（用于 cover/extend 模式）。
+ * 后端代理 _sunoUploadAudio 的 5 步流程。
+ */
+export async function uploadAudioForSuno(
+  file: File,
+): Promise<{ clipId: string; uploadId: string; filename: string; size: number; mime: string }> {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  const r = await fetch('/api/proxy/audio/upload', { method: 'POST', body: fd });
   const data = await r.json();
   if (!r.ok || !data.success) throw new Error(data?.error || `HTTP ${r.status}`);
   return data.data;

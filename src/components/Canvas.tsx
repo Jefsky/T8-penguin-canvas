@@ -138,6 +138,7 @@ const INITIAL_DATA: Record<string, Record<string, any>> = {
   'multi-angle-3d': { preset: 'multi-angle-3d' },
   'panorama-720': { preset: 'panorama-720' },
   'penguin-portrait': { preset: 'penguin-portrait' },
+  audio: { mode: 'generate', version: 'v5.5', title: '', tags: '', seed: 0, continueAt: 28 },
   upload: { uploadType: null },
 };
 
