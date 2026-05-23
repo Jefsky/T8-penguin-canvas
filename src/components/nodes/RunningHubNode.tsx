@@ -1,10 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { Handle, Position, useReactFlow, type NodeProps } from '@xyflow/react';
+import { Handle, Position, useNodeConnections, useNodesData, type NodeProps } from '@xyflow/react';
 import { AlertCircle, Loader2, Workflow, Wallet, Sparkles, Square, Search, RefreshCw } from 'lucide-react';
 import { submitRh, queryRh, fetchRhAppInfo, uploadRhAsset } from '../../services/generation';
 import { useUpdateNodeData } from './useUpdateNodeData';
 import { useHasAutoOutput } from './useHasAutoOutput';
 import { useRunTrigger } from '../../hooks/useRunTrigger';
+import { useUpstreamMaterials } from './useUpstreamMaterials';
+import { useOrderedMaterials } from './useOrderedMaterials';
+import MaterialPreviewSection from './MaterialPreviewSection';
+import { useThemeStore } from '../../stores/theme';
 
 /**
  * RunningHubNode - 主工作流节点
@@ -24,31 +28,14 @@ function inferValueType(fieldType: string | undefined): 'text' | 'number' | 'ima
   return 'text';
 }
 
-// 从上游节点 data 中提取对应 kind 的第一个 url
-function extractUpstreamUrl(d: any, kind: 'image' | 'video' | 'audio'): string {
-  if (!d) return '';
-  if (kind === 'image') {
-    if (typeof d.imageUrl === 'string' && d.imageUrl) return d.imageUrl;
-    if (Array.isArray(d.imageUrls) && d.imageUrls[0]) return d.imageUrls[0];
-    if (Array.isArray(d.urls) && d.urls[0]) return d.urls[0];
-    if (Array.isArray(d.generatedImages) && d.generatedImages[0]) return d.generatedImages[0];
-    if (d.uploadType === 'image' && typeof d.url === 'string') return d.url;
-  } else if (kind === 'video') {
-    if (typeof d.videoUrl === 'string' && d.videoUrl) return d.videoUrl;
-    if (d.uploadType === 'video' && typeof d.url === 'string') return d.url;
-  } else if (kind === 'audio') {
-    if (typeof d.audioUrl === 'string' && d.audioUrl) return d.audioUrl;
-    if (d.uploadType === 'audio' && typeof d.url === 'string') return d.url;
-  }
-  return '';
-}
+// 上游媒体聚合现在由项目统一的 useUpstreamMaterials hook 处理（详见 ./useUpstreamMaterials.ts），
+// 本文件不再手写 extractUpstreamUrl，避免与项目其他节点的 url 提取逻辑产生不一致。
 
 const paramKey = (nodeId: any, fieldName: any) => `${nodeId}::${fieldName}`;
 
 const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
   const update = useUpdateNodeData(id);
   const hasAutoOutput = useHasAutoOutput(id);
-  const { getEdges, getNodes } = useReactFlow();
   const [error, setError] = useState<string | null>(null);
   const pollTimer = useRef<number | null>(null);
   const [fetchingInfo, setFetchingInfo] = useState(false);
@@ -82,22 +69,55 @@ const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
   };
   useEffect(() => () => stopPoll(), []);
 
-  // ========== 上游节点 ==========
-  const upstreamNodes = useMemo(() => {
-    const edges = getEdges();
-    const nodes = getNodes();
-    const upIds = edges.filter((e) => e.target === id).map((e) => e.source);
-    return upIds.map((uid) => nodes.find((n) => n.id === uid)).filter(Boolean) as any[];
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, d]);
+  // ========== 上游节点（响应式订阅）==========
+  // 之前用 useReactFlow().getEdges/getNodes 是非响应式的，上游 data 变化（例如上传图像节点上传完产出 imageUrl）
+  // 不会触发重渲染，导致下面 useEffect 同步上游 url → paramValues 永不触发，节点内媒体预览缺失。
+  // 改用 useNodeConnections + useNodesData，xyflow 内部对依赖做了稳定化，上游连/断/data 任一变化都会立即同步。
+  const conns = useNodeConnections({ id, handleType: 'target' });
+  const upstreamIds = useMemo(
+    () => Array.from(new Set(conns.map((c: any) => c.source).filter(Boolean))) as string[],
+    [conns],
+  );
+  const upstreamNodesData = useNodesData(upstreamIds);
+  const upstreamNodes = useMemo(
+    () => (Array.isArray(upstreamNodesData) ? upstreamNodesData : [upstreamNodesData]).filter(Boolean) as any[],
+    [upstreamNodesData],
+  );
 
-  const findUpstreamUrl = (kind: 'image' | 'video' | 'audio'): string => {
-    for (const n of upstreamNodes) {
-      const u = extractUpstreamUrl(n.data, kind);
-      if (u) return u;
-    }
-    return '';
+  // ========== 上游媒体聚合（与 Image/Video/Audio 节点一致的预览体验）==========
+  // 使用项目统一的 useUpstreamMaterials hook，按 kind 聚合上游 image/video/audio，
+  // 交给 MaterialPreviewSection 统一呈现（含 dnd-kit 拖拽排序、多图并列、双主题适配）。
+  // materialOrder 写入本节点 data，负责序列化限定。
+  const upstream = useUpstreamMaterials(id);
+  const materialOrder: string[] = Array.isArray(d?.materialOrder) ? d.materialOrder : [];
+  const orderedImages = useOrderedMaterials(upstream.images, materialOrder);
+  const orderedVideos = useOrderedMaterials(upstream.videos, materialOrder);
+  const orderedAudios = useOrderedMaterials(upstream.audios, materialOrder);
+  const setMaterialOrder = (newOrder: string[]) => update({ materialOrder: newOrder });
+  const { style, theme } = useThemeStore();
+  const isPixel = style === 'pixel';
+  const isDark = theme === 'dark';
+
+  // 如今需要按“字段在同 kind 下的出现顺序”取第 idx 个排序后的上游素材 url，
+  // 实现多个 image/video/audio 字段逆向分配上游多个素材。并受 MaterialPreviewSection 的拖拽排序控制。
+  const findUpstreamUrl = (kind: 'image' | 'video' | 'audio', idx = 0): string => {
+    const arr = kind === 'image' ? orderedImages : kind === 'video' ? orderedVideos : orderedAudios;
+    return arr[idx]?.url || '';
   };
+
+  // 计算每个 media 字段在同 kind 下的索引（用于字段内“同步”按钮定位素材）
+  const fieldKindIndex = useMemo(() => {
+    const m: Record<string, number> = {};
+    const counters: Record<string, number> = { image: 0, video: 0, audio: 0 };
+    const list: any[] = appInfo?.nodeInfoList || [];
+    for (const it of list) {
+      const vt = inferValueType(it?.fieldType);
+      if (vt === 'image' || vt === 'video' || vt === 'audio') {
+        m[paramKey(it.nodeId, it.fieldName)] = counters[vt]++;
+      }
+    }
+    return m;
+  }, [appInfo]);
 
   // ========== 保存某一条 paramValue ==========
   const setParam = (k: string, patch: Partial<{ value: string; sourceFromUpstream: boolean }>) => {
@@ -111,17 +131,20 @@ const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
   //   - sourceFromUpstream === undefined → 用户从未交互过（包括拉取后只填了默认 fieldValue），
   //                                       一旦上游出现对应 url → 自动启用 + 填值（避免用户漏勾导致提交默认值）
   //   - sourceFromUpstream === false  → 用户主动取消过，不动
+  // 分配策略：同 kind 下的多个字段按 list 顺序逐个取 orderedImages/Videos/Audios[i]，与 MaterialPreviewSection 的拖拽排序联动。
   useEffect(() => {
     const list: any[] = appInfo?.nodeInfoList;
     if (!Array.isArray(list) || list.length === 0) return;
     let changed = false;
     const next = { ...paramValues };
+    const counters: Record<string, number> = { image: 0, video: 0, audio: 0 };
     for (const it of list) {
       const vt = inferValueType(it?.fieldType);
       if (vt !== 'image' && vt !== 'video' && vt !== 'audio') continue;
       const k = paramKey(it.nodeId, it.fieldName);
       const cur = next[k];
-      const upUrl = findUpstreamUrl(vt);
+      const idx = counters[vt]++;
+      const upUrl = findUpstreamUrl(vt, idx);
       if (!upUrl) continue;
       if (cur?.sourceFromUpstream === false) continue; // 用户主动关闭
       if (cur?.sourceFromUpstream === true) {
@@ -137,7 +160,7 @@ const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
     }
     if (changed) update({ paramValues: next });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [upstreamNodes, appInfo]);
+  }, [orderedImages, orderedVideos, orderedAudios, appInfo]);
 
   // ========== 以当前 upstreamNodes + appInfo + paramValues 为输入，同步重算最新 paramValues ==========
   // 用途：handleRun 产业路径上跳过 React state 异步更新陷阱。用户刚连上传视频节点后立刻点
@@ -147,13 +170,15 @@ const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
   ): Record<string, { value: string; sourceFromUpstream?: boolean }> => {
     const next: Record<string, { value: string; sourceFromUpstream?: boolean }> = { ...paramValues };
     if (!Array.isArray(list)) return next;
+    const counters: Record<string, number> = { image: 0, video: 0, audio: 0 };
     for (const it of list) {
       const vt = inferValueType(it?.fieldType);
       if (vt !== 'image' && vt !== 'video' && vt !== 'audio') continue;
       const k = paramKey(it.nodeId, it.fieldName);
       const cur = next[k];
+      const idx = counters[vt]++;
       if (cur?.sourceFromUpstream === false) continue; // 用户主动关闭
-      const upUrl = findUpstreamUrl(vt);
+      const upUrl = findUpstreamUrl(vt, idx);
       if (!upUrl) continue;
       // sourceFromUpstream === true 或 undefined（初次看到上游）都采用上游实时 url
       next[k] = { value: upUrl, sourceFromUpstream: true };
@@ -470,6 +495,21 @@ const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
       </div>
 
       <div className="p-2.5 space-y-2" onMouseDown={(e) => e.stopPropagation()}>
+        {/* 上游媒体聚合预览区：与 Image/Video/Audio 节点使用同一个 MaterialPreviewSection，
+            支持 image/video/audio 三种素材、多图并列、dnd-kit 拖拽排序，拖拽顺序会联动下方参数表的字段分配。 */}
+        {(orderedImages.length + orderedVideos.length + orderedAudios.length) > 0 && (
+          <MaterialPreviewSection
+            images={orderedImages}
+            videos={orderedVideos}
+            audios={orderedAudios}
+            order={materialOrder}
+            onReorder={setMaterialOrder}
+            isDark={isDark}
+            isPixel={isPixel}
+            groups={['image', 'video', 'audio']}
+            title="上游素材 · 拖拽可调整顺序"
+          />
+        )}
         <div>
           <label className="text-[10px] text-white/50 block mb-1">Webapp ID</label>
           <div className="flex gap-1">
@@ -537,7 +577,7 @@ const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
                         {cur.sourceFromUpstream && (
                           <button
                             onClick={() => {
-                              const u = findUpstreamUrl(vt);
+                              const u = findUpstreamUrl(vt, fieldKindIndex[k] ?? 0);
                               if (u) setParam(k, { value: u });
                             }}
                             className="flex items-center gap-1 text-cyan-200/80 hover:text-cyan-100"
@@ -559,29 +599,8 @@ const RunningHubNode = ({ id, data, selected, type }: NodeProps) => {
                             : 'bg-white/5 border-white/10 focus:border-white/30'
                         }`}
                       />
-                      {vt === 'image' && (() => {
-                        // 只有真正可加载的 url 才预览：http(s):// 或本地静态路径；
-                        // RH 内部 fileName（如 api/xxx.png、纯 hash）不能加载，不渲染避免破图占位符
-                        const v = cur.value || '';
-                        const isHttpUrl = /^https?:\/\//i.test(v);
-                        const isLocalUrl =
-                          v.startsWith('/files/output/') ||
-                          v.startsWith('/output/') ||
-                          v.startsWith('/files/input/') ||
-                          v.startsWith('/input/');
-                        const isImgExt = /\.(png|jpe?g|webp|gif|bmp|avif)(\?.*)?$/i.test(v);
-                        if (!(isHttpUrl || isLocalUrl) || !isImgExt) return null;
-                        return (
-                          <img
-                            src={v}
-                            alt="预览"
-                            className="w-full max-h-24 object-contain rounded border border-white/10"
-                            onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).style.display = 'none';
-                            }}
-                          />
-                        );
-                      })()}
+                      {/* 字段内联预览已迁到顶部 MaterialPreviewSection 统一展示（与 Image/Video/Audio 节点样式一致，支持多图 + 拖拽排序），
+                          这里不再重复渲染缩略图，仅保留输入框 + 从上游勾选按钮，避免与顶部预览区重复。 */}
                     </>
                   ) : fieldDataOptions ? (
                     <select
