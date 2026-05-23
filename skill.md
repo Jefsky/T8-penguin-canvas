@@ -1,7 +1,9 @@
 # T8-penguin-canvas · skill.md
 
 > 项目能力 / 接口 / 文件用途速查手册。
-> 版本：v1.5.6 ｜ 仓库：<https://github.com/T8mars/T8-penguin-canvas>
+> 版本：v1.5.7 ｜ 仓库：<https://github.com/T8mars/T8-penguin-canvas>
+>
+> v1.5.7 增量：LLM 节点 上游图片实时预览 + collectUpstream 取同源 · 让用户所见即所发（40）
 >
 > v1.5.6 增量：Shift+拖拽剪刀模式 黑色未选中 edge 命中丢失修复（插值采样避免鼠标跳点 + cut-mode 加宽 stroke）（39）
 > v1.5.5 增量：图像轮询超时上限 120s → 3600s（GPT2 / nano-banana / nano-banana-pro 标准异步路径），避免复杂任务被提前中断（38）
@@ -3486,6 +3488,100 @@ body.cut-mode .react-flow__edge .react-flow__edge-interaction {
 
 - [src/components/Canvas.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/Canvas.tsx#L1414-L1450)——`onCutMove` 插值采样
 - [src/styles/index.css](file:///e:/PenguinPravite/T8-penguin-canvas/src/styles/index.css)——`body.cut-mode` 下 edge 加宽规则
+
+---
+
+## 40. LLM 节点上游图片实时预览与 collectUpstream 取同源（v1.5.7）
+
+### 40.1 用户报告
+
+> llm 节点，图像传入后，节点内没有预览图，也需要和其他节点一样改造下。
+
+### 40.2 根因
+
+[LLMNode.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LLMNode.tsx) 原实现：
+
+- `collectUpstream()` 仅在 `handleSend()` 点击发送时才临时遍历 `getEdges() / getNodes()` 提取上游文本/图片。
+- UI 层完全没有任何上游预览部分——用户不知道点发送后会带上哪些图。
+- 字段覆盖较窄：只读 `imageUrl / image / url` 与 `images / imageUrls` ，未读 `urls / generatedImages`，与项目通用 [useUpstreamMaterials](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/useUpstreamMaterials.ts) 不一致。
+
+### 40.3 修复
+
+#### 修复 1：引入通用 hook
+
+```ts
+import { useUpstreamMaterials } from './useUpstreamMaterials';
+
+// 组件顶层
+const upstreamMats = useUpstreamMaterials(id);
+const upstreamImages = upstreamMats.images;
+```
+
+`useUpstreamMaterials` 内部用 `useNodeConnections({ id, handleType: 'target' }) + useNodesData(upstreamIds)`，上游节点 data 一变就会重渲染，实时同步。
+
+#### 修复 2：新增 UI 预览栏
+
+在 “本地图片（多模态）” 区上方插入一个绿色边框的 “上游图片 · N” 区。
+
+```tsx
+{upstreamImages.length > 0 && (
+  <div>
+    <div className="flex items-center justify-between mb-1">
+      <label className="text-[10px] text-emerald-300/80">上游图片 · {upstreamImages.length}</label>
+      <span className="text-[9px] text-white/30">发送时自动带上</span>
+    </div>
+    <div className="flex gap-1 flex-wrap">
+      {upstreamImages.map((m) => (
+        <div key={m.id} className="relative w-10 h-10" title={`来自: ${m.sourceNodeId.slice(-6)}\n${m.url}`}>
+          <img
+            src={m.url}
+            data-drag-source data-drag-kind="image" data-drag-url={m.url}
+            data-drag-preview={m.url} data-drag-node-id={id}
+            onMouseDown={(e) => beginMaterialDrag(e, { kind: 'image', url: m.url, sourceNodeId: id, previewUrl: m.url })}
+            className="w-10 h-10 object-cover rounded border border-emerald-400/40 cursor-grab"
+          />
+          <span className="absolute -top-1 -left-1 text-[8px] leading-none bg-emerald-500/80 text-white rounded px-1 py-0.5">↑</span>
+        </div>
+      ))}
+    </div>
+  </div>
+)}
+```
+
+- 40×40 缩略图，`emerald-400/40` 边框，区别于本地 “图片附件”。
+- 左上角 `↑` 标记，hover 提示 `来自: xxxxx\n<url>`。
+- 挂 `data-drag-source` 与 `beginMaterialDrag`，支持 Ctrl+拖出到别的节点（与 §33 跨节点拖拽体系一致）。
+
+#### 修复 3：`collectUpstream` 取同源
+
+```ts
+const collectUpstream = (): { text: string; images: string[] } => {
+  const texts = upstreamMats.texts.map((t) => t.url).filter((s) => !!s);
+  const images = upstreamMats.images.map((m) => m.url).filter((s) => !!s);
+  return { text: texts.join('\n').trim(), images };
+};
+```
+
+发送时使用的数据与 UI 预览区使用的是 同一个 `upstreamMats`，从根本上避免“看到几张、实际发出去几张”不一致。
+
+### 40.4 零破坏保证
+
+- 本地上传图片列表（`localImages`）不变，UI 位置改为 “上游图片” 下方。
+- `handleSend` 仅 `collectUpstream` 补换，上下游联动、多模态发送逻辑不变。
+- 拖拽体系：`data-drag-source` + `beginMaterialDrag` 与其他节点一致。
+
+### 40.5 验证清单
+
+- [x] `npx tsc --noEmit` 无报错
+- [x] `npx vite build` 成功（4.21s）
+- [ ] 上传节点 → LLM 节点 连线后，LLM 节点内出现 40×40 缩略图（待用户验证）
+- [ ] 上游图片变化（重新生成/传 base64）后，预览区实时更新。
+- [ ] Ctrl+ 拖出预览图 → 可拖入其他节点。
+
+### 40.6 关键文件
+
+- [src/components/nodes/LLMNode.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LLMNode.tsx)——顶层 hook 调用 + UI 预览栏 + `collectUpstream` 重写
+- [src/components/nodes/useUpstreamMaterials.ts](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/useUpstreamMaterials.ts)——项目通用上游素材聚合 hook（本次仅读取，未修改）
 
 ---
 

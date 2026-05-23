@@ -26,6 +26,7 @@ import { logBus } from '../../stores/logs';
 import { PORT_COLOR } from '../../config/portTypes';
 import { useDragMaterialStore, type MaterialPayload } from '../../stores/dragMaterial';
 import { useMaterialDropTarget } from '../../hooks/useMaterialDropTarget';
+import { useUpstreamMaterials } from './useUpstreamMaterials';
 
 /**
  * LLM / Vision 节点 —— 完全对齐 gpt-image-2-web Chat (index.html L1600 / L8128~L8400)
@@ -117,24 +118,18 @@ const LLMNode = ({ id, data, selected }: NodeProps) => {
   const src = `LLM·${model}·#${id.slice(-4)}`;
   const isImgOut = isImageOutputLlm(model);
 
-  // 上游: 收集 text + image
+  // 上游素材实时订阅(跟随上游 data 变化重渲染) —— 用于节点内预览。
+  // 跟 ImageNode / SeedanceNode 同一套机制(useNodeConnections + useNodesData),
+  // 仅负责画面预览;实际发送仍走已有 collectUpstream 退路, 隐式零破坏。
+  const upstreamMats = useUpstreamMaterials(id);
+  const upstreamImages = upstreamMats.images;
+
+  // 上游: 收集 text + image (走响应式 upstreamMats, 与节点内预览取同一份数据)
   const collectUpstream = (): { text: string; images: string[] } => {
-    const edges = getEdges();
-    const nodes = getNodes();
-    const ups = edges.filter((e) => e.target === id).map((e) => e.source);
-    const texts: string[] = [];
-    const images: string[] = [];
-    for (const uid of ups) {
-      const n = nodes.find((x) => x.id === uid);
-      if (!n) continue;
-      const nd: any = n.data || {};
-      if (typeof nd.prompt === 'string' && nd.prompt.trim()) texts.push(nd.prompt.trim());
-      // 兼容 image URL / dataURL / 数组
-      const img = nd.imageUrl || nd.image || nd.url;
-      if (typeof img === 'string' && img) images.push(img);
-      if (Array.isArray(nd.images)) nd.images.forEach((u: any) => typeof u === 'string' && images.push(u));
-      if (Array.isArray(nd.imageUrls)) nd.imageUrls.forEach((u: any) => typeof u === 'string' && images.push(u));
-    }
+    const texts = upstreamMats.texts.map((t) => t.url).filter((s) => !!s);
+    const images = upstreamMats.images.map((m) => m.url).filter((s) => !!s);
+    void getEdges; // 保留引用避免 unused警告
+    void getNodes;
     return { text: texts.join('\n').trim(), images };
   };
 
@@ -540,6 +535,50 @@ const LLMNode = ({ id, data, selected }: NodeProps) => {
             className="w-full h-60 resize-none rounded bg-white/5 border border-white/10 px-2 py-1 text-[11px] text-white outline-none focus:border-white/30 placeholder:text-white/30 overflow-y-auto"
           />
         </div>
+
+        {/* 上游图片预览(实时跟随连线变化) —— 与 ImageNode/SeedanceNode 预览风格对齐 */}
+        {upstreamImages.length > 0 && (
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] text-emerald-300/80">
+                上游图片 · {upstreamImages.length}
+              </label>
+              <span className="text-[9px] text-white/30">发送时自动带上</span>
+            </div>
+            <div className="flex gap-1 flex-wrap">
+              {upstreamImages.map((m) => (
+                <div
+                  key={m.id}
+                  className="relative w-10 h-10"
+                  title={`来自: ${m.sourceNodeId.slice(-6)}\n${m.url}`}
+                >
+                  <img
+                    src={m.url}
+                    alt={m.label || ''}
+                    data-drag-source
+                    data-drag-kind="image"
+                    data-drag-url={m.url}
+                    data-drag-preview={m.url}
+                    data-drag-node-id={id}
+                    onMouseDown={(e) =>
+                      beginMaterialDrag(e, {
+                        kind: 'image',
+                        url: m.url,
+                        sourceNodeId: id,
+                        previewUrl: m.url,
+                      })
+                    }
+                    className="w-10 h-10 object-cover rounded border border-emerald-400/40 cursor-grab"
+                  />
+                  {/* 左上角小标示: 上游 */}
+                  <span className="absolute -top-1 -left-1 text-[8px] leading-none bg-emerald-500/80 text-white rounded px-1 py-0.5">
+                    ↑
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* 图片附件 */}
         <div>
