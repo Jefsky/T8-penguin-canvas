@@ -1,7 +1,13 @@
 # T8-penguin-canvas · skill.md
 
 > 项目能力 / 接口 / 文件用途速查手册。
-> 版本：v1.5.8 ｜ 仓库：<https://github.com/T8mars/T8-penguin-canvas>
+> 版本：v1.2.1 ｜ 仓库：<https://github.com/T8mars/T8-penguin-canvas>
+>
+> v1.2.1 增量（§47）：Electron 打包加密链路 3 处根因修复 + 标准化 SOP 沉淀 — bytenode .jsc loader 复刻（vm.Script + cachedData 直跑、跳过 tmpFile 二次 require）+ asar 外 .t8c 的 require MODULE_NOT_FOUND 回退 loader.cjs 自身（解析 app.asar/node_modules/express|cors|multer|sharp）+ backend/src/config.js 识别 T8PC_PACKAGED/T8PC_USER_DATA/T8PC_FRONTEND_DIST 三环境变量（数据写 userData、NODE_ENV=production）+ backend/src/server.js 打包模式 express.static + SPA 兑底（regex 排除 api/files/input/output 4 前缀）+ main.cjs 三处版本号同步 v1.2.0 + 6 项打包前必检 checklist + 完整 SOP 写入本章作为下次打包唯一参考依据。
+>
+> v1.6.0 增量（§46）：RH LIST/SELECT 字段识别 + KNOWN_FIELD_OPTIONS 词典兜底、多素材协议约束（fieldValue 必须单 fileName）、RunningHubNode 接入 logBus 统一日志面板、像素风全局禁用 backdrop-filter（一次修复 18+ 节点字模糊）、ResizeNode 默认 fit=cover + ImageOpFrame 有下游 OutputNode 时隐藏内部预览
+>
+> v1.5.9 增量（§45）：默认主题改像素风(light) + RH 钱包应用节点 + RH 钱包独立 APIKEY全链路透传 + 永久规则『未明确指令不主动打包』
 >
 > v1.5.8 增量：API Key 设置眼睛预览修复 + 7 类分类独立 Key（gpt-image / nano-banana / mj / veo / grok / seedance / suno）以模型名路由，未填 fallback 贞贞通用（41）
 >
@@ -4159,3 +4165,680 @@ RH 钱包节点采用 `violet` 主调（`border-violet-400` / `bg-violet-500/20`
 
 ---
 
+## 46. RH LIST 识别 + 多素材协议约束 + logBus 统一 + 像素风字模糊全局解 + ResizeNode 体验修正（v1.6.0）
+
+### 46.1 背景
+
+本章集中记录 v1.6.0 一轮贴身体验调优，跨越 5 个独立点、共 8 个 commit。
+
+| commit | 修复点 |
+|--------|--------|
+| `4326319` | RH LIST/SELECT 字段正确识别并支持下拉选择 |
+| `64b4ffa` | 多图 / 多视频 / 多音频上游接入完整传递到 RH |
+| `5dde07f` | 多素材改用单条 fieldValue 换行拼接（错误尝试，后被撤回） |
+| `98f2005` | hotfix：revert 多行 fieldValue 拼接（修复 Custom validation failed for node） |
+| `2d633a3` | KNOWN_FIELD_OPTIONS 词典兜底 + 字段头紧凑竖线分隔 |
+| `4ae4570` | RunningHubNode 接入 logBus + 像素风全局禁用 backdrop-filter |
+| `0f55c8d` | ResizeNode 默认 fit=cover + ImageOpFrame 下游 OutputNode 时隐藏内部预览 |
+
+---
+
+### 46.2 RH LIST/SELECT 字段正确识别 + KNOWN_FIELD_OPTIONS 词典兜底
+
+#### 问题症状
+
+> RunningHub 节点和 RH 钱包节点，输入 webappId 点击搜索获取的 nodeList 中有些应该是个 list，但节点内显示的是个 string——只从 list 获取了首个或默认选项。
+
+#### 根因
+
+RH apiCallDemo 返回的 fieldType 不总是 `LIST` / `SELECT`。很多枚举字段（如 `aspectRatio` / `resolution`）后端实际上返 `fieldType=TEXT`，也不带 `fieldData` / `options` 数组，只能靠参数名作为经验推定。
+
+#### 修复
+
+[RunningHubNode.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/RunningHubNode.tsx) `extractFieldOptions(it)` 三层探测：
+
+```ts
+// 一、多字段名候选（8 种）
+const candidates = [it?.fieldData, it?.options, it?.list, it?.values, it?.enum,
+  it?.choices, it?.items, it?.selectOptions, it?.dropdown];
+for (const c of candidates) {
+  // 1) 纯文本/数字数组
+  if (c.every(x => typeof x === 'string' || typeof x === 'number')) return c;
+  // 2) [{label, value}] / [{name, value}]
+  if (c.every(x => x && typeof x === 'object' && ('value' in x || 'label' in x || 'name' in x))) {
+    return c.map(x => x.value ?? x.label ?? x.name).filter(v => v != null);
+  }
+}
+// 二、fieldType=LIST/SELECT/DROPDOWN/COMBO/ENUM 且 fieldValue 本身是数组 → 取 fieldValue
+if (['LIST','SELECT','DROPDOWN','COMBO','ENUM'].includes(t) && Array.isArray(it?.fieldValue)) {
+  return it.fieldValue;
+}
+// 三、词典兜底（大小写不敏感）
+const KNOWN_FIELD_OPTIONS = {
+  aspectRatio: ['1:1','16:9','9:16','4:3','3:4','4:5','5:4','3:2','2:3','21:9','9:21','1:4','4:1','1:8','8:1'],
+  aspect_ratio: [...], ratio: [...],
+  resolution: ['1k','2k','4k','8k'],
+  size: ['512','768','1024','1280','1536','2048'],
+  mode: ['text2img','img2img'],
+  quality: ['low','medium','high','best'],
+  instanceType: ['default','plus','pro'], instance_type: [...],
+  precision: ['fp16','fp32','bf16'],
+  scheduler: ['normal','karras','exponential','sgm_uniform','simple','ddim_uniform'],
+  sampler: ['euler','euler_ancestral','heun','dpm_2','dpm_2_ancestral','lms','dpmpp_2m','dpmpp_sde','ddim','uni_pc'],
+};
+const keyLower = String(it?.fieldName || '').toLowerCase();
+for (const [k, v] of Object.entries(KNOWN_FIELD_OPTIONS)) {
+  if (k.toLowerCase() === keyLower) return v;
+}
+```
+
+同时字段默认值 `extractDefaultValue(it)` 与 `extractFieldOptions` 配套：选项首项作默认值，避免 LIST 字段被当 string 提交。
+
+#### 字段头紧凑竖线分隔
+
+原三段（fieldName / 类型徽标 / `#nodeId`） `space-x-2 text-[10px]` 间距过大看起来“划裂”，用户反馈后改：
+
+```tsx
+<div className="flex items-center gap-1 text-[10px] leading-tight">
+  <span className="text-white/80 font-medium truncate">{it.fieldName}</span>
+  <span className="text-white/20">|</span>
+  <span className="text-cyan-300/60 px-1 rounded bg-cyan-500/10">
+    {fieldDataOptions ? `select(${fieldDataOptions.length})` : vt}
+  </span>
+  <span className="text-white/20">|</span>
+  <span className="text-white/30">#{it.nodeId}</span>
+</div>
+```
+
+#### 词典扩展路线
+
+`fetchInfo` 拉取后调用 `logBus.debug('[RH/fetchInfo]', JSON.stringify(list, null, 2), src)` 输出完整 `nodeInfoList`，后续发现未识别枚举参数名时，直接在 `KNOWN_FIELD_OPTIONS` 字典中补一行即可，不需改代码逻辑。
+
+---
+
+### 46.3 RH 多素材协议约束（错误尝试→撤回→沉淀规范）
+
+#### 问题症状
+
+> 输入 2 个图片、让 2 个人一起跳舞，但生成时只有后一个人，第一个参考素材没被传入。
+
+#### 调研结论（协议约束）
+
+RunningHub `nodeInfoList` 提交协议两条核心约束：
+
+1. `fieldValue` 必须是单一 `fileName`，**不接受多行 / 逗号拼接**。违反则 RH 后端报 `Custom validation failed for node`。
+2. 同一 `(nodeId, fieldName)` 重复条目 → RH 后端会覆盖（后一条赢），所以不能用 “同名多条 nodeInfoList” 传多张。
+
+结论：单 image 字段 + N 张上游图，协议层只能传 1 张。**多图能力必须依赖 webapp 模板内部提供多个 image 字段**，从节点表单侧以多字段分别传入。
+
+#### 修复
+
+- `5dde07f` 尝试多行拼接 → RH 返 `Custom validation failed for node` → `98f2005` hotfix 全部撤回
+- `resolveNodeInfoList` 提交前加 strip multiline 兜底：`fieldValue.includes('\n') → 只取首行 + logBus.warn(...)`避免代码中偶发传入多行字符串时仍能调用成功
+- 本调研结果同步到 `task_breakdown_experience` 记忆：不要再尝试在单 image 字段动多图传递
+
+---
+
+### 46.4 RunningHubNode 接入 logBus 统一日志面板
+
+#### 问题症状
+
+> 日志功能好像失效了，运行了半天，什么都没打印。
+
+#### 根因
+
+[TerminalPanel.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/TerminalPanel.tsx) 仅订阅 `useLogStore.entries`（`logBus.{info,success,warn,error,debug}` 推入的）。原 `RunningHubNode` 全部用 `console.log/warn/error` 调试，从不入面板，面板自然“什么都没打印”。
+
+#### 修复
+
+```tsx
+import { logBus } from '../../stores/logs';
+
+const src = `${useWallet ? 'rh-wallet' : 'rh'}:${id}`;
+
+// 9 处关键事件同步下发面板（保留 console 调试）
+logBus.info(`fetching webapp info: ${webappId}`, src);     // fetchInfo 进入
+logBus.info(`submitting taskId=${tid}`, src);              // submit 进入
+logBus.success(`submitted, taskId=${tid}`, src);           // submit 完成
+logBus.debug(`polling status=${status}`, src);             // poll 每 30s
+logBus.success(`done, ${urls.length} outputs`, src);       // 完成
+logBus.error(`failed: ${msg}`, src);                       // RH 返错
+logBus.warn(`poll error: ${e.message}`, src);              // 轮询出错
+logBus.warn(`stopped manually`, src);                       // 手动停止
+logBus.debug('override fieldValue from upstream', src);    // resolveNodeInfoList 兜底覆盖
+logBus.warn('strip multiline fieldValue', src);            // strip multiline 兜底
+```
+
+#### 面板误读防护
+
+- `src` 不同节点（`rh:abc` / `rh-wallet:def`）在面板中能一眼区分
+- 严重事件用 `error` / `warn`，高频轮询用 `debug` 避免刷屏
+- 主流程事件（submit / done）用 `success`，与 GPT2/Suno/MJ 保持一致质感
+
+---
+
+### 46.5 像素风全局禁用 backdrop-filter（一次修复 18+ 节点）
+
+#### 问题症状
+
+> RunningHub 节点和 RH 钱包节点，感觉字模模糊糊的，是不是加了什么虚化模糊效果？其他节点也要排查下。
+
+#### 根因
+
+18+ 节点都用了 inline `style={{ backdropFilter: 'blur(8px)' }}` + 半透明背景。在像素风（`html[data-theme-style="pixel"]`）下亚像素渲染导致中文发虚。逐个改 18+ tsx 成本高且易遗漏。
+
+#### 修复（双层防御）
+
+**全局兜底**：[theme-pixel.css](file:///e:/PenguinPravite/T8-penguin-canvas/src/styles/theme-pixel.css) 加 `!important` 覆盖所有 ReactFlow 节点 inline 样式：
+
+```css
+html[data-theme-style="pixel"] .react-flow__node,
+html[data-theme-style="pixel"] .react-flow__node > div,
+html[data-theme-style="pixel"] .react-flow__node * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+```
+
+**关键节点本身切换**：RunningHubNode / RhConfigNode 容器按 `isPixel` 切换不透明背景，遵循 Tailwind 哲学的 "能用变量就不用 !important" 原则：
+
+```tsx
+const { style: themeStyle } = useThemeStore();
+const isPixel = themeStyle === 'pixel';
+// ...
+style={{
+  background: isPixel ? 'var(--px-surface)' : 'rgba(20,20,22,.92)',
+  backdropFilter: isPixel ? 'none' : 'blur(8px)',
+  color: isPixel ? 'var(--px-ink)' : undefined,
+}}
+```
+
+#### 服务对象
+
+本修复影响全部 ReactFlow 节点子子孙元素（不仅限 RH），包括 ImageNode/VideoNode/AudioNode/LLMNode/SeedanceNode/UploadNode/OutputNode/ResizeNode/CombineNode/UpscaleNode/GridCropNode/RemoveBgNode/RelayNode/IdeaNode/BPNode/TextNode/EditNode/DrawingBoardNode 等。
+
+---
+
+### 46.6 ResizeNode：默认 fit=cover + 下游 OutputNode 时隐藏内部预览
+
+#### 问题症状
+
+> 尺寸调节节点有问题，首先有输出节点的时候，节点内部应该隐藏预览，第二，剪裁完全没生效，输入图什么样，现在还是什么样。
+
+#### 根因 1：sharp `fit` 语义陷阱
+
+| fit | 语义 | 输出尺寸 | 几何 |
+|-----|------|---------|-----|
+| `inside`（原默认）| 等比缩放不超过 W×H，**不裁剪** | 不一定是 W×H | 保比例 |
+| `cover` | 裁剪铺满到严格 W×H | 严格 W×H | 保比例 |
+| `contain` | 包含留白到严格 W×H | 严格 W×H | 保比例 |
+| `fill` | 拉伸到严格 W×H | 严格 W×H | 可变形 |
+
+9:16 原图 → 1024×1024 `inside` ≈ 576×1024，仍是 9:16 看起来跟原图一样。这是 sharp 语义与用户对「尺寸调整」直觉不一致。后端 saveBuffer 已生成 `op_xxxxx.png` 证明接口跑了，只是输出看起来「没变」。
+
+#### 根因 2：ImageOpFrame 无条件渲染预览
+
+[ImageOpFrame.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/ImageOpFrame.tsx) 是 Resize/Upscale/Crop/GridCrop/Combine/RemoveBg 六个节点的通用外壳，未判断下游是否已接 OutputNode，一律渲染 `outImg` / `outUrls`，造成节点内与 OutputNode 双显。
+
+#### 修复 1：ResizeNode 默认 fit=cover + 中文 label
+
+```tsx
+const fit = d?.fit || 'cover'; // 默认从 inside 改为 cover
+
+const FIT_OPTIONS: Array<{ v: string; label: string }> = [
+  { v: 'cover',   label: 'cover · 裁剪铺满（保比例）' },
+  { v: 'contain', label: 'contain · 包含留白（保比例）' },
+  { v: 'inside',  label: 'inside · 不超尺寸（不裁剪）' },
+  { v: 'fill',    label: 'fill · 拉伸填充（可变形）' },
+];
+// <select> 渲染 FIT_OPTIONS
+```
+
+老存档 `d?.fit==='inside'` 仍保留，仅「新建节点」默认变 cover。
+
+#### 修复 2：ImageOpFrame 复用 useHasAutoOutput hook
+
+使用项目现成的 [useHasAutoOutput.ts](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/useHasAutoOutput.ts)（检测下游是否连了 type==='output' 的 OutputNode）：
+
+```tsx
+import { useHasAutoOutput } from './useHasAutoOutput';
+
+const hasAutoOutput = useHasAutoOutput(id);
+
+// 下游已连 OutputNode：隐藏节点内预览
+{outImg && !hasAutoOutput && (
+  <div className="border-t border-white/10 p-2">
+    <img src={outImg} alt="结果" className="w-full rounded object-contain" />
+  </div>
+)}
+{outUrls.length > 0 && !hasAutoOutput && (
+  <div className="border-t border-white/10 p-2 grid grid-cols-3 gap-1">
+    {outUrls.map((u, i) => <img key={i} src={u} alt={`#${i}`} className="w-full rounded object-cover" />)}
+  </div>
+)}
+```
+
+影响范围：**一次修复 6 个 ImageOp 节点**（Resize/Upscale/Crop/GridCrop/Combine/RemoveBg）。
+
+---
+
+### 46.7 验收清单
+
+- [x] RH 节点 webappId 搜索后，aspectRatio / resolution / mode 等枚举参数渲染为 `<select>` 下拉（不是 input）
+- [x] LIST 字段选择变更后提交会带上选中项，不是首项默认值
+- [x] 字段头三段间距紧凑、用竖线分隔
+- [x] 输入 2 张图提交不再报 `Custom validation failed for node`（仅传首张、多行拼接已撤销）
+- [x] 面板「终端」打开可看到 `[rh:xxx] fetching webapp info` / `submitting taskId=...` / `polling status=...` / `done, N outputs` 等条目
+- [x] 像素风 + light 下 RH / RH钱包节点字体清晰，没有“发虚”
+- [x] 其他节点 ImageNode/SeedanceNode/UploadNode/OutputNode 也不再发虚（全局 CSS 覆盖生效）
+- [x] ResizeNode 默认拖入，9:16 原图 → 1024×1024 输出为 1:1 裁剪铺满（fit=cover 生效）
+- [x] ResizeNode 下游连 OutputNode 时，节点内部预览差，仅 OutputNode 显示
+- [x] `npx tsc --noEmit` 通过
+
+### 46.8 关键文件
+
+- [src/components/nodes/RunningHubNode.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/RunningHubNode.tsx)（LIST 识别 + 词典兜底 + 字段头紧凑 + logBus 接入 + isPixel 容器切换 + multiline strip 兜底）
+- [src/components/nodes/RhConfigNode.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/RhConfigNode.tsx)（引入 useThemeStore + isPixel 容器切换）
+- [src/styles/theme-pixel.css](file:///e:/PenguinPravite/T8-penguin-canvas/src/styles/theme-pixel.css)（`html[data-theme-style="pixel"] .react-flow__node *` backdrop-filter: none !important 全局兜底）
+- [src/components/nodes/ResizeNode.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/ResizeNode.tsx)（默认 fit=cover + FIT_OPTIONS 中文 label）
+- [src/components/nodes/ImageOpFrame.tsx](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/ImageOpFrame.tsx)（useHasAutoOutput 控制 outImg/outUrls 是否渲染）
+- [src/components/nodes/useHasAutoOutput.ts](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/useHasAutoOutput.ts)（检测下游 OutputNode 的现成 hook，本次复用未修改）
+- [src/stores/logs.ts](file:///e:/PenguinPravite/T8-penguin-canvas/src/stores/logs.ts)（logBus 实现，未修改）
+
+### 46.9 提交链
+
+```
+4326319  fix(rh): RunningHub/RH钱包节点正确识别LIST/SELECT字段并支持下拉选择
+64b4ffa  fix(rh): 多图/多视频/多音频上游接入完整传递到 RH
+5dde07f  fix(rh): 多素材改用单条fieldValue换行拼接,规避RH同fieldName覆盖语义（错误尝试）
+98f2005  hotfix(rh): revert多行fieldValue拼接,修复Custom validation failed for node
+2d633a3  feat(rh): 常见枚举字段词典兜底 + 字段头紧凑竖线分隔
+4ae4570  fix(rh+pixel): RH接入logBus日志面板 + 像素风全局禁用backdrop-filter
+0f55c8d  fix(resize): 下游连OutputNode时隐藏内部预览 + fit 默认cover修正裁剪语义
+```
+
+---
+
+## 47. Electron 打包加密链路·3 处根因 + 标准化 SOP（v1.2.1）
+
+> **本章是下次打包的唯一参考依据。任何打包问题先回看本章再动手。**
+>
+> 永久规则：**未经用户明确指令（“打包”/“build”/“dist”/“发版”），不允许主动执行任何打包动作。** 本章修复仅在用户明确要求“打包”时延续上一轮“修复打包启动报错”指令的合理继续。
+
+### 47.1 背景
+
+v1.2.0 首次打包出 NSIS 安装包后，安装运行报错：
+
+- 加载窗卡在「启动中…」无法跳到主窗口；
+- `dbg.log` 报 `Cannot find module 'express'`；
+- require stack 顶部为 `C:\Users\ADMINI~1\AppData\Local\Temp\t8pc-jsc\xxx.jsc`，下方为 `resources/app.asar/electron/loader.cjs` → `main.cjs`。
+
+本次根治了 **三处独立根因** + 留下 **6 项打包前必检 checklist** + **完整 SOP**，再打包不会出现同类问题。
+
+### 47.2 完整产物拓扑（v1.2.1 起）
+
+```
+dist_electron/
+├─ T8-PenguinCanvas-Setup-1.2.0.exe           # NSIS 安装包(约 87 MB)
+└─ win-unpacked/
+   ├─ T8-PenguinCanvas.exe                    # Electron 主可执行
+   ├─ resources/
+   │  ├─ app.asar                             # 主代码包(asar 内)
+   │  │  ├─ electron/{main,loader,preload}.cjs
+   │  │  ├─ package.json
+   │  │  └─ node_modules/                     # express / cors / multer / bytenode 等
+   │  ├─ app.asar.unpacked/
+   │  │  └─ node_modules/sharp/**             # asarUnpack(原生 .node 必须解包)
+   │  │  └─ node_modules/@img/**
+   │  ├─ backend-enc/                         # extraResources(asar 外)
+   │  │  ├─ server.t8c                        # T8ENC1 加密的 V8 字节码
+   │  │  ├─ config.t8c
+   │  │  ├─ utils/*.t8c
+   │  │  └─ routes/{canvas,settings,proxy,files,imageOps}.t8c
+   │  └─ frontend/                            # extraResources(asar 外)
+   │     ├─ index.html                        # vite build 产物
+   │     └─ assets/index-*.{js,css}
+   ├─ ffmpeg.dll / d3dcompiler_47.dll / *.pak / locales/ 等
+   └─ 启动数据持久化 → %APPDATA%/t8-penguin-canvas/  (productName 全小写)
+      ├─ data/{canvas_list,settings,rh_apps}.json
+      ├─ input/  output/  thumbnails/
+```
+
+### 47.3 三处根因详解（**重点**）
+
+#### 根因 1：bytenode 的 .jsc loader 二次 require 引发 paths 漂移
+
+旧版 `electron/loader.cjs` 的 `.t8c` hook：
+
+```js
+// ❌ 错误实现
+require.extensions['.t8c'] = function (mod, filename) {
+  const enc = fs.readFileSync(filename);
+  const jsc = decryptBuffer(enc);
+  const tmpFile = path.join(tmpDir, md5(filename) + '.jsc');
+  fs.writeFileSync(tmpFile, jsc);
+  mod.exports = require(tmpFile);   // ← 致命：触发 bytenode 内置 .jsc loader
+};
+```
+
+问题：
+
+- 把解密产物落到 `%TEMP%/t8pc-jsc/` 后再 `require(tmpFile)`，会激活 bytenode 内置的 `.jsc` 加载器；
+- bytenode 把 `tmpFile` 当做新的 `fileModule`，其 `module.paths` 沿 `%TEMP%/t8pc-jsc/node_modules/...` 向上查找；
+- `%TEMP%` 路径下根本没有 node_modules，`fileModule.require('express')` 自然 `MODULE_NOT_FOUND`。
+
+#### 根因 2：.t8c 在 asar 外，paths 仍然到不了 app.asar/node_modules
+
+即便修复根因 1，让 `.t8c` 在原文件位置上下文里运行，新的 require stack 会变为：
+
+```
+resources\backend-enc\server.t8c        ← .t8c 真实位置
+  ↓ fileModule.paths
+resources\backend-enc\node_modules       (空)
+resources\node_modules                   (空)
+win-unpacked\node_modules                (空)
+```
+
+`backend-enc/` 是 `extraResources`，**位于 asar 外**；它的 `module.paths` 永远不会回到 `app.asar/node_modules`，但 `express/cors/multer/sharp` 都安装在 asar 内部。
+
+#### 根因 3：backend/src/config.js + server.js 完全没适配打包模式
+
+- `config.js` 旧版只用 `path.resolve(__dirname, '..', '..')` 推 `PROJECT_DIR`，打包后这个路径指向只读的 `win-unpacked/`，写 JSON 直接 EACCES；
+- `NODE_ENV` 仍然是 `'development'`；
+- `server.js` 完全没有 `express.static` 托管前端 dist，浏览器 `GET /` 返回 `Cannot GET /`。
+
+### 47.4 修复点逐一对照
+
+| # | 文件 | 关键改动 |
+|---|------|---------|
+| 1 | [electron/loader.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/loader.cjs) | 重写 .t8c hook：复刻 bytenode 内部逻辑 `generateScript` + `fixBytecode`(按 Node 版本动态拷贝 dummy 字节码 flag 区) + `readSourceHash`，用 `vm.Script + cachedData` 直接在原始 .t8c `fileModule` 上下文中 `runInThisContext`，手动 `apply` CommonJS wrapper `[fileModule.exports, req, fileModule, filename, dirname, process, global]` |
+| 2 | [electron/loader.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/loader.cjs) | 自定义 `req(id)` 包装 `fileModule.require`，捕获 `MODULE_NOT_FOUND` 时回退到 loader.cjs 自身 `require`；`req.resolve` 同步加同等兜底；`req.extensions / req.cache / req.main` 透传保证生态一致 |
+| 3 | [backend/src/config.js](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/config.js) | 整文件重写：`IS_PACKAGED = process.env.T8PC_PACKAGED === '1'`，`DATA_ROOT = IS_PACKAGED ? T8PC_USER_DATA : PROJECT_DIR`；所有目录 `BASE_DIR/DATA_DIR/INPUT_DIR/OUTPUT_DIR/THUMBNAILS_DIR + 三个 *_FILE` 全从 `DATA_ROOT` 派生；`FRONTEND_DIST = T8PC_FRONTEND_DIST \|\| (IS_PACKAGED ? '' : project/dist)`；`NODE_ENV` 打包模式默认 `production`；启动时 `fs.mkdirSync(recursive)` 自动建 4 个数据目录 |
+| 4 | [backend/src/server.js](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/server.js) | 在 `app.use('/api/image', imageOpsRouter)` 之后 / `app.listen` 之前插入：<br/>`if (config.IS_PACKAGED && config.FRONTEND_DIST && fs.existsSync(config.FRONTEND_DIST)) { app.use(express.static(config.FRONTEND_DIST)); app.get(/^\/(?!api\/\|files\/\|input\/\|output\/).*/, (_req, res) => res.sendFile(path.join(config.FRONTEND_DIST, 'index.html'))); }` |
+| 5 | [electron/main.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/main.cjs) | 三处版本号 v1.1.0 → v1.2.0：① 主窗 `BrowserWindow.title` ② log 窗口 HTML 模板 ③ `ipcMain.handle('t8pc:get-info')` 返回 `version` |
+| 6 | [electron/_post_build.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/_post_build.cjs) | 已就绪：验证 7 个 .t8c + frontend/{index.html,assets} 必存在；强制清除 `resources/{app,backend}/src` 明文目录（防止 electron-builder 误打入） |
+
+### 47.5 关键代码片段
+
+#### loader.cjs · .t8c require hook 核心
+
+```js
+const ZERO_LENGTH_EXTERNAL_REFERENCE_TABLE = Buffer.from([0x00, 0x00]);
+function isBufferV8Bytecode(buf) {
+  return Buffer.isBuffer(buf)
+    && !buf.subarray(0, 2).equals(ZERO_LENGTH_EXTERNAL_REFERENCE_TABLE)
+    && buf.length >= 16;
+}
+function readSourceHash(buf) {
+  if (process.version.startsWith('v8.8') || process.version.startsWith('v8.9'))
+    return buf.subarray(12, 16).reduce((s,n,p)=>s+n*Math.pow(256,p),0);
+  return buf.subarray(8, 12).reduce((s,n,p)=>s+n*Math.pow(256,p),0);
+}
+function fixBytecode(buf) {
+  loadBytenode();
+  const dummy = _bytenodeMod.compileCode('"\u0caa_\u0caa"');
+  const v = parseFloat(process.version.slice(1, 5));
+  if (process.version.startsWith('v8.8') || process.version.startsWith('v8.9')) {
+    dummy.subarray(16, 20).copy(buf, 16);
+    dummy.subarray(20, 24).copy(buf, 20);
+  } else if (v >= 12 && v <= 23) {
+    dummy.subarray(12, 16).copy(buf, 12);
+  } else {
+    dummy.subarray(12, 16).copy(buf, 12);
+    dummy.subarray(16, 20).copy(buf, 16);
+  }
+}
+function generateScript(cachedData, filename) {
+  let buf = cachedData;
+  if (!isBufferV8Bytecode(buf)) buf = brotliDecompressSync(buf);
+  fixBytecode(buf);
+  const length = readSourceHash(buf);
+  const dummyCode = length > 1 ? '"' + '\u200b'.repeat(length - 2) + '"' : '';
+  const script = new vm.Script(dummyCode, { cachedData: buf, filename });
+  if (script.cachedDataRejected)
+    throw new Error('[T8ENC1] cachedDataRejected (V8 版本不匹配?请重新 npm run encrypt)');
+  return script;
+}
+require.extensions['.t8c'] = function (fileModule, filename) {
+  const enc = fs.readFileSync(filename);
+  const jsc = decryptBuffer(enc);
+  const script = generateScript(jsc, filename);
+  function req(id) {
+    try { return fileModule.require(id); }
+    catch (e) {
+      // ★ 关键回退：.t8c 在 asar 外，express 等在 asar 内
+      if (e && e.code === 'MODULE_NOT_FOUND') return require(id);
+      throw e;
+    }
+  }
+  req.resolve = function (request, options) {
+    try { return Module._resolveFilename(request, fileModule, false, options); }
+    catch (e) {
+      if (e && e.code === 'MODULE_NOT_FOUND') return require.resolve(request, options);
+      throw e;
+    }
+  };
+  req.extensions = Module._extensions;
+  req.cache = Module._cache;
+  if (process.main) req.main = process.main;
+  const compiledWrapper = script.runInThisContext({ filename, lineOffset: 0, columnOffset: 0, displayErrors: true });
+  const dirname = path.dirname(filename);
+  const args = [fileModule.exports, req, fileModule, filename, dirname, process, global];
+  return compiledWrapper.apply(fileModule.exports, args);
+};
+// require('./xxx') 在 .js/.json 都缺失时自动尝试 .t8c
+const _origResolve = Module._resolveFilename;
+Module._resolveFilename = function (request, parent, ...rest) {
+  try { return _origResolve.call(this, request, parent, ...rest); }
+  catch (e) {
+    try { return _origResolve.call(this, request + '.t8c', parent, ...rest); }
+    catch (_) { throw e; }
+  }
+};
+```
+
+#### main.cjs · 环境变量注入 + require 入口
+
+```js
+async function startBackend() {
+  backendPort = await findFreePort(18766);
+  process.env.PORT = String(backendPort);
+  process.env.HOST = '127.0.0.1';
+  process.env.T8PC_USER_DATA = getUserDataDir();              // app.getPath('userData')
+  process.env.T8PC_PACKAGED  = isPackaged() ? '1' : '0';
+  process.env.T8PC_RES       = isPackaged() ? process.resourcesPath : path.resolve(__dirname, '..');
+  process.env.T8PC_FRONTEND_DIST = isPackaged()
+    ? path.join(process.resourcesPath, 'frontend')
+    : path.resolve(__dirname, '..', 'dist');
+
+  require('./loader.cjs');                                     // ★ 必须先注册 .t8c hook
+  if (isPackaged()) {
+    const entry = path.join(process.resourcesPath, 'backend-enc', 'server.t8c');
+    require(entry);
+  } else {
+    require(path.resolve(__dirname, '..', 'backend', 'src', 'server.js'));
+  }
+}
+```
+
+#### config.js · 双模式数据根目录
+
+```js
+const IS_PACKAGED = process.env.T8PC_PACKAGED === '1';
+const PROJECT_DIR = path.resolve(__dirname, '..', '..');
+const USER_DATA = process.env.T8PC_USER_DATA && process.env.T8PC_USER_DATA.trim().length > 0
+  ? process.env.T8PC_USER_DATA
+  : PROJECT_DIR;
+const DATA_ROOT = IS_PACKAGED ? USER_DATA : PROJECT_DIR;
+const config = {
+  HOST: process.env.HOST || '127.0.0.1',
+  PORT: process.env.PORT || 18766,
+  NODE_ENV: process.env.NODE_ENV || (IS_PACKAGED ? 'production' : 'development'),
+  IS_PACKAGED,
+  BASE_DIR:       DATA_ROOT,
+  DATA_DIR:       path.join(DATA_ROOT, 'data'),
+  INPUT_DIR:      path.join(DATA_ROOT, 'input'),
+  OUTPUT_DIR:     path.join(DATA_ROOT, 'output'),
+  THUMBNAILS_DIR: path.join(DATA_ROOT, 'thumbnails'),
+  CANVAS_FILE:   path.join(DATA_ROOT, 'data', 'canvas_list.json'),
+  SETTINGS_FILE: path.join(DATA_ROOT, 'data', 'settings.json'),
+  RH_APPS_FILE:  path.join(DATA_ROOT, 'data', 'rh_apps.json'),
+  FRONTEND_DIST: process.env.T8PC_FRONTEND_DIST
+    || (IS_PACKAGED ? '' : path.join(PROJECT_DIR, 'dist')),
+  THUMBNAIL_SIZE: 160, THUMBNAIL_QUALITY: 80, MAX_FILE_SIZE: 10 * 1024 * 1024,
+  ZHENZHEN_BASE_URL: 'https://ai.t8star.org',
+  RH_BASE_URL:       'https://www.runninghub.cn',
+};
+if (IS_PACKAGED) {
+  for (const dir of [config.DATA_DIR, config.INPUT_DIR, config.OUTPUT_DIR, config.THUMBNAILS_DIR]) {
+    try { if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  }
+}
+module.exports = config;
+```
+
+#### server.js · 打包模式前端托管
+
+```js
+// 在 app.use('/api/image', imageOpsRouter) 之后、app.listen 之前
+if (config.IS_PACKAGED && config.FRONTEND_DIST && fs.existsSync(config.FRONTEND_DIST)) {
+  app.use(express.static(config.FRONTEND_DIST));
+  // SPA 兑底：除 api/files/input/output 4 个前缀外都返回 index.html
+  app.get(/^\/(?!api\/|files\/|input\/|output\/).*/, (_req, res) => {
+    res.sendFile(path.join(config.FRONTEND_DIST, 'index.html'));
+  });
+}
+```
+
+### 47.6 标准化打包 SOP（**下次打包必照做**）
+
+#### 步骤 0 · 打包前必检 checklist（6 项）
+
+- [ ] **package.json 版本号已 bump**（`version` 字段决定 `T8-PenguinCanvas-Setup-${version}.exe`）
+- [ ] **electron/main.cjs 三处版本号已同步**：① `BrowserWindow.title` ② log 窗口 HTML `<span>v...</span>` ③ `ipcMain.handle('t8pc:get-info')` 返回 `version` —— 否则窗口标题与安装包不一致，用户疑惑
+- [ ] **vite.config.ts / vite.config.js 的 `__APP_VERSION__` 已同步**（默认 `JSON.stringify('1.0.0')` 是伺服默认，必须与 package.json 版本号一致）
+- [ ] **backend/src/{config.js,server.js} 改动后必须重新 `npm run encrypt`**（否则 .t8c 还是旧字节码）
+- [ ] **bytenode 已 npm install**（`dependencies` 中 `bytenode: ^1.5.7`，`postinstall` 跑 `electron-builder install-app-deps`）
+- [ ] **dist_electron / build / *.tsbuildinfo / electron/*.js / _temp_* 已在 .gitignore**（永不上传到仓库）
+- [ ] **当前用户**明确说了「打包」/「build」/「dist」/「发版」 —— 否则**禁止执行**任何 `npm run dist*`
+
+#### 步骤 1 · 加密后端
+
+```powershell
+cd e:\PenguinPravite\T8-penguin-canvas
+npm run encrypt
+# = cross-env ELECTRON_RUN_AS_NODE=1 electron electron/encrypt.cjs
+```
+
+要点：
+
+- **必须用 Electron 内置 Node 跑**（`ELECTRON_RUN_AS_NODE=1` + `electron` 二进制），否则 V8 字节码版本与运行时不匹配，启动后 `cachedDataRejected` 异常；
+- 输入：`backend/src/**/*.{js,json}` → 输出：`build/backend-enc/*.t8c`（共 8 个：server + config + utils/* + routes/{canvas,settings,proxy,files,imageOps}）；
+- `encrypt.cjs` 的 `rewriteRequires(src)` 自动把 `require('./foo')` / `require('./foo.js')` 改写为 `require('./foo.t8c')`，所以源码里所有相对 require 必须保持相对路径，不要写成绝对路径或 alias。
+
+#### 步骤 2 · 前端构建（与加密同捆 npm script）
+
+```powershell
+npm run prepack:enc
+# = npm run build && npm run encrypt
+# vite build → dist/  +  bytenode/T8ENC1 → build/backend-enc/
+```
+
+#### 步骤 3 · 出 NSIS 安装包
+
+```powershell
+# 完整流程(出 .exe 安装包):
+npm run dist
+# = npm run prepack:enc && electron-builder --win --x64 && node electron/_post_build.cjs
+
+# 或仅出免安装目录(调试用):
+npm run dist:dir
+# = npm run prepack:enc && electron-builder --win --x64 --dir && node electron/_post_build.cjs
+```
+
+#### 步骤 4 · `_post_build.cjs` 自动核验
+
+输出形如：
+
+```
+[1] 加密后端字节码:
+  ✅ resources/backend-enc/server.t8c
+  ✅ resources/backend-enc/config.t8c
+  ✅ resources/backend-enc/routes/canvas.t8c
+  ... (5 个 routes)
+[2] 前端 dist:
+  ✅ resources/frontend/index.html
+  ✅ resources/frontend/assets
+[3] 清除可能混入的明文后端源码:
+  (无打印 = 没有意外混入,正确)
+[4] resources/ 完整结构: ...
+[post-build] DONE ✅
+```
+
+#### 步骤 5 · 实测启动验证
+
+```powershell
+.\dist_electron\win-unpacked\T8-PenguinCanvas.exe
+```
+
+**必看日志**（在 log 窗口 / DevTools / `%APPDATA%/t8-penguin-canvas/dbg.log`）：
+
+```
+[backend] picked port=18766
+[backend] loading encrypted entry: ...\resources\backend-enc\server.t8c
+[backend] started in-process on http://127.0.0.1:18766
+环境: production                                        ← 必须是 production
+数据目录: C:\Users\<USER>\AppData\Roaming\t8-penguin-canvas\data
+GET / 200
+GET /assets/index-*.js  /assets/index-*.css
+GET /api/canvas         GET /api/settings
+窗口标题: 贞贞的无限画布（企鹅共创版）
+```
+
+任何一项不符 → 回看 §47.3 三处根因。
+
+### 47.7 调试技巧
+
+| 现象 | 排查路径 |
+|------|---------|
+| `Cannot find module 'xxx'`，stack 顶为 `%TEMP%/t8pc-jsc/*.jsc` | loader.cjs 的 .t8c hook 误用了 tmpFile 二次 require，回看 §47.3 根因 1 |
+| `Cannot find module 'express'`，stack 顶为 `resources/backend-enc/*.t8c` | `req()` 没加 MODULE_NOT_FOUND 回退，回看 §47.3 根因 2 |
+| 启动日志显示 `环境: development` 或 `数据目录: dist_electron\win-unpacked\data` | config.js 没识别 `T8PC_PACKAGED` / `T8PC_USER_DATA`，回看 §47.3 根因 3 |
+| 浏览器 `GET /` 返回 `Cannot GET /` | server.js 没注册 `express.static(FRONTEND_DIST)`，回看 §47.4 修复 4 |
+| `cachedDataRejected (V8 版本不匹配?请重新 npm run encrypt)` | encrypt 时用的 Node 版本与运行时 Electron V8 不一致，重新 `npm run encrypt`（必须 Electron 内置 Node）|
+| sharp 报 `Cannot find module '@img/sharp-win32-x64'` | `asarUnpack: ['node_modules/sharp/**/*', 'node_modules/@img/**/*']` 漏配，回看 package.json `build.asarUnpack` |
+| 启动后 RH/贞贞 API 全部 401 | settings.json 没迁移到 userData，老用户从开发版升级时手动复制 `<project>/data/settings.json` → `%APPDATA%/t8-penguin-canvas/data/settings.json` |
+| log 窗口一直停在「启动中…」不消失 | `waitForBackend(port, 30)` 探活失败 → backend require 阶段抛了异常，看 dbg.log 的 `[backend] FAILED to start` 完整 stack |
+
+### 47.8 关键文件清单
+
+- [electron/main.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/main.cjs)（环境变量注入 + 启动后端 + 主窗口 + log 窗口；版本号 3 处需同步 package.json）
+- [electron/loader.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/loader.cjs)（T8ENC1 + .t8c require hook + bytenode .jsc 内部逻辑复刻 + MODULE_NOT_FOUND 回退）
+- [electron/encrypt.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/encrypt.cjs)（`bytenode.compileCode(Module.wrap(src))` + `encryptBuffer` + `rewriteRequires` 把相对 require 改写为 `.t8c`）
+- [electron/_post_build.cjs](file:///e:/PenguinPravite/T8-penguin-canvas/electron/_post_build.cjs)（产物核验 + 强制清明文）
+- [backend/src/config.js](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/config.js)（`IS_PACKAGED` + `DATA_ROOT` 派生所有目录 + 自动 mkdir）
+- [backend/src/server.js](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/server.js)（打包模式 `express.static` + SPA 兑底）
+- [package.json](file:///e:/PenguinPravite/T8-penguin-canvas/package.json)（`build.asar` / `build.asarUnpack` / `build.extraResources` / `build.files` 黑白名单 / NSIS 配置）
+
+### 47.9 永久规则补充
+
+1. **未明确指令前不允许打包** —— 已写入 §45.4，本次打包仅是上一轮指令的合理延续。
+2. **package.json 版本号 bump 后，必须同步检查 electron/main.cjs 三处版本号**（标题 / log 窗口 HTML / IPC version）。
+3. **`backend/src/` 任何修改都必须重新 `npm run encrypt`**，否则 .t8c 还是旧字节码。
+4. **`encrypt` 必须用 Electron 内置 Node 跑**（`ELECTRON_RUN_AS_NODE=1 electron`），否则 V8 字节码版本不匹配。
+5. **`dist_electron/` 与 `build/` 已在 .gitignore，永不提交**；GitHub 不传安装包，发版另走 release 通道。
+6. **`.t8c` 必须放在 asar 外**（`extraResources`），asar 内的 .t8c 由于 require 解析机制无法被 hook 捕获到。
+
+### 47.10 提交链
+
+```
+(本章对应改动 commit 规划)
+fix(electron+backend): 修复打包后启动报 express 不存在 + 后端打包模式适配
+  - electron/loader.cjs: 重写 .t8c hook(bytenode .jsc 复刻) + MODULE_NOT_FOUND 回退
+  - electron/main.cjs : v1.1.0 → v1.2.0 三处版本号同步
+  - backend/src/config.js : 识别 T8PC_PACKAGED/T8PC_USER_DATA/T8PC_FRONTEND_DIST
+  - backend/src/server.js : 打包模式 express.static + SPA 兑底
+docs(skill+features): §47 / phase27 沉淀打包链路 3 处根因 + SOP + checklist
+```
+
+---
