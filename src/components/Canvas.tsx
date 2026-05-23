@@ -1890,7 +1890,18 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
       };
       pushImg(d.imageUrl);
       if (Array.isArray(d.imageUrls)) d.imageUrls.forEach(pushImg);
-      if (Array.isArray(d.urls)) d.urls.forEach(pushImg);
+      // d.urls 是通用产物数组（RH 使用），可能同时含图/视频/音频。
+      // 按扩展名分流，避免 mp4 url 被当 image 加入 imgs 后下游 OutputNode 误用 pickKind='image' 过滤。
+      if (Array.isArray(d.urls)) {
+        const isVidExt = (u: string) => /\.(mp4|webm|mov|m4v|mkv)(\?.*)?$/i.test(u);
+        const isAudExt = (u: string) => /\.(mp3|wav|ogg|m4a|flac|aac)(\?.*)?$/i.test(u);
+        d.urls.forEach((u: any) => {
+          if (typeof u !== 'string' || !u) return;
+          if (isVidExt(u)) pushVid(u);
+          else if (isAudExt(u)) pushAud(u);
+          else pushImg(u);
+        });
+      }
       if (Array.isArray(d.generatedImages)) d.generatedImages.forEach(pushImg);
       pushVid(d.videoUrl);
       pushAud(d.audioUrl);
