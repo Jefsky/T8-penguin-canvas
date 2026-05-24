@@ -278,13 +278,24 @@ const LoopNode = (p: NodeProps) => {
     }));
     }
 
-    // 4. 最终聚合到 imageUrls / urls / videoUrl... (取成功结果)
+    // v1.2.9.3: 循环器自身是否输出最终聚合
+    //   - 子图内有 OutputNode (累积已由下游 OutputNode 自接管展示) → 循环器不再聚合, 并清空运行时残留的 fresh 字段,
+    //     避免「循环器直接接 OutputNode」时与下游 EXEC→OutputNode 累积链路展示重复 (用户体验奇怪: 2 份)
+    //   - 子图内没有 OutputNode → 仍按原逻辑聚合输出 (保留循环器单独充当汇总展示的用法)
     const successOnly = collected.filter((x): x is string => !!x);
     const aggPatch: any = {};
-    if (kind === 'image') { aggPatch.imageUrls = successOnly; aggPatch.urls = successOnly; aggPatch.imageUrl = successOnly[0] || ''; }
-    else if (kind === 'video') { aggPatch.videoUrl = successOnly[0] || ''; aggPatch.videoUrls = successOnly; }
-    else if (kind === 'audio') { aggPatch.audioUrl = successOnly[0] || ''; aggPatch.audioUrls = successOnly; }
-    else { aggPatch.text = successOnly.join('\n\n'); aggPatch.prompt = successOnly.join('\n\n'); aggPatch.outputText = successOnly.join('\n\n'); aggPatch.texts = successOnly; }
+    if (outputNodeIds.size > 0) {
+      // 不再聚合 + 清空本轮注入残留, 让循环器自身端口对下游不产出素材
+      if (kind === 'image') { aggPatch.imageUrl = ''; aggPatch.imageUrls = []; aggPatch.urls = []; }
+      else if (kind === 'video') { aggPatch.videoUrl = ''; aggPatch.videoUrls = []; }
+      else if (kind === 'audio') { aggPatch.audioUrl = ''; aggPatch.audioUrls = []; }
+      else { aggPatch.text = ''; aggPatch.prompt = ''; aggPatch.outputText = ''; aggPatch.texts = []; }
+    } else {
+      if (kind === 'image') { aggPatch.imageUrls = successOnly; aggPatch.urls = successOnly; aggPatch.imageUrl = successOnly[0] || ''; }
+      else if (kind === 'video') { aggPatch.videoUrl = successOnly[0] || ''; aggPatch.videoUrls = successOnly; }
+      else if (kind === 'audio') { aggPatch.audioUrl = successOnly[0] || ''; aggPatch.audioUrls = successOnly; }
+      else { aggPatch.text = successOnly.join('\n\n'); aggPatch.prompt = successOnly.join('\n\n'); aggPatch.outputText = successOnly.join('\n\n'); aggPatch.texts = successOnly; }
+    }
     update({ status: cancelRef.current ? 'idle' : (failCount === items.length ? 'error' : 'success'), error: null, ...aggPatch });
   }, [id, items, kind, rf, update]);
 
@@ -392,13 +403,21 @@ const LoopNode = (p: NodeProps) => {
 
     await Promise.all(chainOrders.map((_, i) => runChain(i)));
 
-    // 最终聚合
+    // v1.2.9.3: 同 runSerial 的逻辑——子图内有 OutputNode 时循环器不再输出聚合 (避免与下游累积展示重复)
     const successOnly = collected.filter((x): x is string => !!x);
     const aggPatch: any = {};
-    if (kind === 'image') { aggPatch.imageUrls = successOnly; aggPatch.urls = successOnly; aggPatch.imageUrl = successOnly[0] || ''; }
-    else if (kind === 'video') { aggPatch.videoUrl = successOnly[0] || ''; aggPatch.videoUrls = successOnly; }
-    else if (kind === 'audio') { aggPatch.audioUrl = successOnly[0] || ''; aggPatch.audioUrls = successOnly; }
-    else { aggPatch.text = successOnly.join('\n\n'); aggPatch.prompt = successOnly.join('\n\n'); aggPatch.outputText = successOnly.join('\n\n'); aggPatch.texts = successOnly; }
+    const parallelHasOutput = subNodes.some((n) => n.type === 'output');
+    if (parallelHasOutput) {
+      if (kind === 'image') { aggPatch.imageUrl = ''; aggPatch.imageUrls = []; aggPatch.urls = []; }
+      else if (kind === 'video') { aggPatch.videoUrl = ''; aggPatch.videoUrls = []; }
+      else if (kind === 'audio') { aggPatch.audioUrl = ''; aggPatch.audioUrls = []; }
+      else { aggPatch.text = ''; aggPatch.prompt = ''; aggPatch.outputText = ''; aggPatch.texts = []; }
+    } else {
+      if (kind === 'image') { aggPatch.imageUrls = successOnly; aggPatch.urls = successOnly; aggPatch.imageUrl = successOnly[0] || ''; }
+      else if (kind === 'video') { aggPatch.videoUrl = successOnly[0] || ''; aggPatch.videoUrls = successOnly; }
+      else if (kind === 'audio') { aggPatch.audioUrl = successOnly[0] || ''; aggPatch.audioUrls = successOnly; }
+      else { aggPatch.text = successOnly.join('\n\n'); aggPatch.prompt = successOnly.join('\n\n'); aggPatch.outputText = successOnly.join('\n\n'); aggPatch.texts = successOnly; }
+    }
     update({ status: cancelRef.current ? 'idle' : (failCount === items.length ? 'error' : 'success'), error: null, ...aggPatch });
   }, [id, items, kind, rf, update]);
 
