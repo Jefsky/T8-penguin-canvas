@@ -107,6 +107,7 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
           ud.audioUrl_1 || '', // Suno 双轨副轨; 漏写会导致只显示第 1 首
           ud.firstFrameUrl || '', // v1.2.8.4: FramePair 双端口字段
           ud.lastFrameUrl || '',
+          ud.__loopAccumulate ? `LA:${ud.__loopAccumulate}` : '', // v1.2.9.1: 循环累积标记 — 进入/退出循环时需重算 collected
           arr1,
           arr2,
           arr3,
