@@ -32,7 +32,7 @@ interface KeySpec {
 }
 
 const COMMON_KEYS: KeySpec[] = [
-  { field: 'zhenzhenApiKey', label: '贞贞工坑 API Key', desc: '· 通用后备 · 用于图像/视频/音频生成', bullet: 'bg-amber-400' },
+  { field: 'zhenzhenApiKey', label: '贞贞工坊 API Key', desc: '· 通用后备 · 用于图像/视频/音频生成', bullet: 'bg-amber-400' },
   { field: 'rhApiKey', label: 'RunningHub API Key', desc: '· 用于 RH 工作流', bullet: 'bg-cyan-400' },
   { field: 'rhWalletApiKey', label: 'RH 钱包 APIKEY', desc: '· 用于 RH 钱包应用 · RH 企业级共享 APIKEY', bullet: 'bg-violet-400' },
   { field: 'llmApiKey', label: 'LLM 独立 API Key', desc: '· 额度隔离 · 用于 LLM/Vision', bullet: 'bg-emerald-400' },
