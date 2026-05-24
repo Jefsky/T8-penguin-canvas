@@ -72,6 +72,11 @@ export const NODE_PORTS: Record<string, NodePorts> = {
   'frame-extractor': { inputs: ['video'], outputs: ['image'] },
   // 首尾帧获取: 视频抽首/尾两帧 → 双 source handle (id=first/last) 输出 image
   'frame-pair': { inputs: ['video'], outputs: ['image'] },
+  // 循环器 (v1.2.8): 接受 4 类素材集合 → 按 kind 输出下游驱动 (串联/并联)
+  // 输出默认按 kind 递多类型 (any 允许接任意下游执行节点)
+  loop: { inputs: ['text', 'image', 'video', 'audio'], outputs: ['text', 'image', 'video', 'audio'] },
+  // 从合集获取 (v1.2.8): 从上游集合中选中单一素材 → 输出按 kind 变化
+  'pick-from-set': { inputs: ['text', 'image', 'video', 'audio'], outputs: ['text', 'image', 'video', 'audio'] },
   resize: { inputs: ['image'], outputs: ['image'] },
   combine: { inputs: ['image'], outputs: ['image'] },
   'remove-bg': { inputs: ['image'], outputs: ['image'] },
@@ -164,6 +169,10 @@ export function isConnectionValid(
 ): boolean {
   if (!source || !target) return false;
   if (source.id === target.id) return false; // 不允许自连
+  // v1.2.9.6: 禁止「循环器 → 输出素材」连接 —— 循环器自身不产出最终结果,
+  //          这种连接会变成无内容的空白 OutputNode, 影响体验; 真正的展示应走
+  //          「循环器 → EXEC 节点 → OutputNode」累积链路。
+  if ((source as any).type === 'loop' && (target as any).type === 'output') return false;
   const sOut = getNodeOutputs(source);
   const tIn = getNodeInputs(target);
   return arePortsCompatible(sOut, tIn);

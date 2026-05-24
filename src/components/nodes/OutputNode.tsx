@@ -72,6 +72,25 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
   // 订阅上游节点的 data, 任何上游 data 变化都会触发重渲染
   const upstreamNodes = useNodesData(upstreamIds);
 
+  // v1.2.9.5: 检测上游是否含 LoopNode —— 用于「直接接 LoopNode 的 OutputNode」空状态下显示友好提示,
+  //         代替误导性的「连入上游...」占位 (循环器不产出素材 → OutputNode 本身也不应表现得像「坏掉」)。
+  const upstreamHasLoop = useMemo(() => {
+    const list = Array.isArray(upstreamNodes) ? upstreamNodes : [];
+    return list.some((n: any) => n?.type === 'loop');
+  }, [upstreamNodes]);
+
+  // v1.2.8.4: 收集每个上游 source 上被连接的 sourceHandle 集合,
+  //           供 FramePair 等多端口节点按 handle 区分输出 (与 useUpstreamMaterials 对齐)
+  const handleMap = useMemo(() => {
+    const m = new Map<string, Set<string | null>>();
+    for (const c of connections) {
+      let set = m.get(c.source);
+      if (!set) { set = new Set<string | null>(); m.set(c.source, set); }
+      set.add((c as any).sourceHandle ?? null);
+    }
+    return m;
+  }, [connections]);
+
   // 细粒度字段签名: 防止 xyflow useNodesData 返回引用稳定导致 useMemo 漏重算;
   // 纯字符串变化 React 可靠跟踪，上游任何一个被迫关心的字段变动均会重算 collected。
   const upstreamSig = useMemo(() => {
@@ -93,6 +112,9 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
           ud.videoUrl || '',
           ud.audioUrl || '',
           ud.audioUrl_1 || '', // Suno 双轨副轨; 漏写会导致只显示第 1 首
+          ud.firstFrameUrl || '', // v1.2.8.4: FramePair 双端口字段
+          ud.lastFrameUrl || '',
+          ud.__loopAccumulate ? `LA:${ud.__loopAccumulate}` : '', // v1.2.9.1: 循环累积标记 — 进入/退出循环时需重算 collected
           arr1,
           arr2,
           arr3,
@@ -142,12 +164,37 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
     const list = Array.isArray(upstreamNodes) ? upstreamNodes : [];
     for (const n of list) {
       const ud: any = n?.data || {};
+      const sid = (n as any)?.id || '';
+      const handles = handleMap.get(sid) || new Set<string | null>([null]);
+
+      // === v1.2.9.0: 循环累积模式 —— 上游节点被 LoopNode 标记 __loopAccumulate 时,
+      //             跳过该上游的 fresh 字段收集 (让本节点 direct*Urls / directOutputText 的累积值独占显示)。
+      //             这样跨轮产物不会被生成节点「本轮覆盖」的 fresh 担换, 循环结束后标记被 LoopNode 清除, 恢复正常透传。
+      if (ud.__loopAccumulate) continue;
 
       // 文本
       pushUniqueText(out.texts, ud.outputText);
       pushUniqueText(out.texts, ud.reply);
       pushUniqueText(out.texts, ud.prompt);
       pushUniqueText(out.texts, ud.text);
+
+      // === v1.2.8.4: FramePair 双端口语义 ===
+      // 节点同时具备 firstFrameUrl + lastFrameUrl 字段时按 sourceHandle 过滤,
+      //   - 'first' 端口 → 只输出首帧
+      //   - 'last'  端口 → 只输出尾帧
+      //   - null/默认  → 同时输出两帧 (autoOutput / 手动接默认 handle 的兼容)
+      // 跳过通用 imageUrl/imageUrls 分支, 避免历史残留字段把双图都捞过来。
+      const isFramePair =
+        Object.prototype.hasOwnProperty.call(ud, 'firstFrameUrl') &&
+        Object.prototype.hasOwnProperty.call(ud, 'lastFrameUrl');
+      if (isFramePair) {
+        const wantFirst = handles.has('first') || (handles.has(null) && !handles.has('last'));
+        const wantLast = handles.has('last') || (handles.has(null) && !handles.has('first'));
+        if (wantFirst) pushUnique(out.images, ud.firstFrameUrl);
+        if (wantLast) pushUnique(out.images, ud.lastFrameUrl);
+        // 视频/音频 此节点不会有, 跳过
+        continue;
+      }
 
       // 图像 - 单
       pushUnique(out.images, ud.imageUrl);
@@ -179,8 +226,19 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
     if (typeof d.directVideoUrl === 'string' && d.directVideoUrl) {
       pushUnique(out.videos, d.directVideoUrl);
     }
+    // v1.2.8.3: 多产物数组 (LoopNode 串联 / 并联跨轮累积)
+    if (Array.isArray(d.directVideoUrls)) {
+      d.directVideoUrls.forEach((u: any) => pushUnique(out.videos, u));
+    }
     if (typeof d.directAudioUrl === 'string' && d.directAudioUrl) {
       pushUnique(out.audios, d.directAudioUrl);
+    }
+    if (Array.isArray(d.directAudioUrls)) {
+      d.directAudioUrls.forEach((u: any) => pushUnique(out.audios, u));
+    }
+    // v1.2.8.5: 循环器跨轮累积的文本联接作为独立一项加入 (已含 —— 分隔符)
+    if (typeof d.directOutputText === 'string' && d.directOutputText) {
+      pushUniqueText(out.texts, d.directOutputText);
     }
 
     // 兜底: 一些节点把视频/音频塞在 imageUrl, 通过扩展名识别再纠正
@@ -223,7 +281,7 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
     }
 
     return out;
-  }, [upstreamNodes, upstreamSig, d.pickKind, d.pickIndex, d.directImageUrl, d.directImageUrls, d.directVideoUrl, d.directAudioUrl]);
+  }, [upstreamNodes, upstreamSig, handleMap, d.pickKind, d.pickIndex, d.directImageUrl, d.directImageUrls, d.directVideoUrl, d.directVideoUrls, d.directAudioUrl, d.directAudioUrls, d.directOutputText]);
 
   // 文本编辑
   const overrideText: string = typeof d.outputText === 'string' ? d.outputText : '';
@@ -327,6 +385,81 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
     accepts: ['image', 'video', 'audio', 'text'],
     onDrop: handleDrop,
   });
+
+  // === v1.2.9.2: 循环累积自接管 —— OutputNode 自己检测上游 __loopAccumulate 并将 fresh 追加到自身 direct*Urls
+  //         不依赖 LoopNode 跨节点 setNodes 写回 (避免时序冲突/覆盖), LoopNode 只负责注入/清除 __loopAccumulate 标记。
+  // === v1.2.9.4: 改用 rf.setNodes 函数式形式读取自身节点最新 data 计算 merge ——避免闭包陈旧 d.directImageUrls
+  //         在快速多轮循环下被后来的 useEffect fire 覆盖 (表现为: ImageNode/VideoNode 等下游 OutputNode 只累积到 1−2 张)。
+  //         同时该机制是「通用」的 ——后续新增任何 EXEC 节点, 只要 update 写入 imageUrl/imageUrls/urls/generatedImages/videoUrl/videoUrls/audioUrl/audioUrl_1/audioUrls/outputText/reply/text
+  //         中任一字段, 下游 OutputNode 均可累积, 无需修改。
+  useEffect(() => {
+    const list = Array.isArray(upstreamNodes) ? upstreamNodes : [];
+    const hasAccumUpstream = list.some((n: any) => n?.data?.__loopAccumulate);
+    if (!hasAccumUpstream) return;
+    const freshImgs: string[] = [];
+    const freshVids: string[] = [];
+    const freshAuds: string[] = [];
+    const freshTxts: string[] = [];
+    const pushUniqLocal = (arr: string[], v: any) => {
+      if (typeof v !== 'string') return;
+      const s = v.trim();
+      if (!s) return;
+      if (arr.indexOf(s) === -1) arr.push(s);
+    };
+    for (const n of list) {
+      const ud: any = n?.data || {};
+      if (!ud.__loopAccumulate) continue;
+      const sid = (n as any)?.id || '';
+      const handles = handleMap.get(sid) || new Set<string | null>([null]);
+      const isFP =
+        Object.prototype.hasOwnProperty.call(ud, 'firstFrameUrl') &&
+        Object.prototype.hasOwnProperty.call(ud, 'lastFrameUrl');
+      if (isFP) {
+        const wantFirst = handles.has('first') || (handles.has(null) && !handles.has('last'));
+        const wantLast = handles.has('last') || (handles.has(null) && !handles.has('first'));
+        if (wantFirst) pushUniqLocal(freshImgs, ud.firstFrameUrl);
+        if (wantLast) pushUniqLocal(freshImgs, ud.lastFrameUrl);
+        continue;
+      }
+      // 通用采集 —— 任何 EXEC 节点写入以下任一字段都会被累积
+      pushUniqLocal(freshImgs, ud.imageUrl);
+      if (Array.isArray(ud.imageUrls)) ud.imageUrls.forEach((u: any) => pushUniqLocal(freshImgs, u));
+      if (Array.isArray(ud.urls)) ud.urls.forEach((u: any) => pushUniqLocal(freshImgs, u));
+      if (Array.isArray(ud.generatedImages)) ud.generatedImages.forEach((u: any) => pushUniqLocal(freshImgs, u));
+      pushUniqLocal(freshVids, ud.videoUrl);
+      if (Array.isArray(ud.videoUrls)) ud.videoUrls.forEach((u: any) => pushUniqLocal(freshVids, u));
+      pushUniqLocal(freshAuds, ud.audioUrl);
+      pushUniqLocal(freshAuds, ud.audioUrl_1);
+      if (Array.isArray(ud.audioUrls)) ud.audioUrls.forEach((u: any) => pushUniqLocal(freshAuds, u));
+      if (typeof ud.outputText === 'string' && ud.outputText) pushUniqLocal(freshTxts, ud.outputText);
+      if (typeof ud.reply === 'string' && ud.reply) pushUniqLocal(freshTxts, ud.reply);
+      if (typeof ud.text === 'string' && ud.text) pushUniqLocal(freshTxts, ud.text);
+    }
+    if (freshImgs.length === 0 && freshVids.length === 0 && freshAuds.length === 0 && freshTxts.length === 0) return;
+    // v1.2.9.4: 函数式 setNodes —— 从 store 最新 data 读取 cur direct*Urls, 避免闭包旧值被其他 useEffect 覆盖
+    rf.setNodes((nds) => nds.map((nd) => {
+      if (nd.id !== id) return nd;
+      const od: any = nd.data || {};
+      const curImgs: string[] = Array.isArray(od.directImageUrls) ? od.directImageUrls : [];
+      const curVids: string[] = Array.isArray(od.directVideoUrls) ? od.directVideoUrls : [];
+      const curAuds: string[] = Array.isArray(od.directAudioUrls) ? od.directAudioUrls : [];
+      const curTxts: string[] = typeof od.directOutputText === 'string' && od.directOutputText
+        ? od.directOutputText.split('\n\n')
+        : [];
+      const mergedImgs = curImgs.slice(); freshImgs.forEach((u) => { if (mergedImgs.indexOf(u) === -1) mergedImgs.push(u); });
+      const mergedVids = curVids.slice(); freshVids.forEach((u) => { if (mergedVids.indexOf(u) === -1) mergedVids.push(u); });
+      const mergedAuds = curAuds.slice(); freshAuds.forEach((u) => { if (mergedAuds.indexOf(u) === -1) mergedAuds.push(u); });
+      const mergedTxts = curTxts.slice(); freshTxts.forEach((t) => { if (mergedTxts.indexOf(t) === -1) mergedTxts.push(t); });
+      let changed = false;
+      const nextData: any = { ...od };
+      if (mergedImgs.length !== curImgs.length) { nextData.directImageUrls = mergedImgs; changed = true; }
+      if (mergedVids.length !== curVids.length) { nextData.directVideoUrls = mergedVids; changed = true; }
+      if (mergedAuds.length !== curAuds.length) { nextData.directAudioUrls = mergedAuds; changed = true; }
+      if (mergedTxts.length !== curTxts.length) { nextData.directOutputText = mergedTxts.join('\n\n'); changed = true; }
+      return changed ? { ...nd, data: nextData } : nd;
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upstreamSig]);
 
   // === 下游透传: 将 collected + displayText 写到自身 data 供下游节点读取 ===
   // 仅在生成的输出实际变化时调用 update, 避免 setNode 风暴.
@@ -520,11 +653,13 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
       <div className="p-2.5 space-y-3" onMouseDown={(e) => e.stopPropagation()}>
         {total === 0 && (
           <div
-            className={`rounded flex items-center justify-center text-[11px] py-3 px-2 ${
+            className={`rounded flex items-center justify-center text-[11px] py-3 px-2 text-center ${
               isDark ? 'text-white/40' : 'text-zinc-400'
             }`}
           >
-            连入上游 文本 / 图像 / 视频 / 音频 节点
+            {upstreamHasLoop
+              ? '循环器不输出素材 · 请在「循环器 → EXEC 节点 → OutputNode」链路中查看累积结果'
+              : '连入上游 文本 / 图像 / 视频 / 音频 节点'}
           </div>
         )}
 
@@ -615,43 +750,56 @@ const OutputNode = ({ id, data, selected }: NodeProps) => {
               <ImageIcon size={11} />
               <span>图像 ({collected.images.length})</span>
             </div>
-            {collected.images.map((u, i) => (
-              <div key={i} className="space-y-0.5">
-                <img
-                  src={u}
-                  alt={`图像 ${i + 1}`}
-                  className="w-full h-auto rounded block cursor-zoom-in"
-                  style={{ background: '#0008', objectFit: 'contain', maxHeight: 480 }}
-                  data-drag-source
-                  data-drag-kind="image"
-                  data-drag-url={u}
-                  data-drag-preview={u}
-                  data-drag-node-id={id}
-                  onMouseDown={(e) =>
-                    beginMaterialDrag(e, { kind: 'image', url: u, sourceNodeId: id, previewUrl: u })
-                  }
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    setEditingUrl(u);
-                  }}
-                  title="双击编辑 (裁剪 / 宫格切分) · Ctrl+拖拽可送到其他节点"
-                />
-                <div className={`flex items-center gap-1 text-[10px] ${isDark ? 'text-white/40' : 'text-zinc-400'}`}>
-                  <span className="truncate flex-1" title={u}>{u.split('/').pop()}</span>
-                  <a
-                    href={u}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download
-                    className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${
-                      isDark ? 'hover:bg-white/10 text-white/60' : 'hover:bg-black/10 text-zinc-600'
-                    }`}
-                  >
-                    <Download size={10} /> 下载
-                  </a>
+            {/* 单张：全宽大图预览；多张：3 列网格（一行最多 3 张，超过自动换行） */}
+            <div
+              className={
+                collected.images.length >= 2
+                  ? 'grid grid-cols-3 gap-1.5'
+                  : 'space-y-1'
+              }
+            >
+              {collected.images.map((u, i) => (
+                <div key={i} className="space-y-0.5">
+                  <img
+                    src={u}
+                    alt={`图像 ${i + 1}`}
+                    className="w-full h-auto rounded block cursor-zoom-in"
+                    style={{
+                      background: '#0008',
+                      objectFit: 'contain',
+                      maxHeight: collected.images.length >= 2 ? 140 : 480,
+                    }}
+                    data-drag-source
+                    data-drag-kind="image"
+                    data-drag-url={u}
+                    data-drag-preview={u}
+                    data-drag-node-id={id}
+                    onMouseDown={(e) =>
+                      beginMaterialDrag(e, { kind: 'image', url: u, sourceNodeId: id, previewUrl: u })
+                    }
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      setEditingUrl(u);
+                    }}
+                    title="双击编辑 (裁剪 / 宫格切分) · Ctrl+拖拽可送到其他节点"
+                  />
+                  <div className={`flex items-center gap-1 text-[10px] ${isDark ? 'text-white/40' : 'text-zinc-400'}`}>
+                    <span className="truncate flex-1" title={u}>{u.split('/').pop()}</span>
+                    <a
+                      href={u}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      download
+                      className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${
+                        isDark ? 'hover:bg-white/10 text-white/60' : 'hover:bg-black/10 text-zinc-600'
+                      }`}
+                    >
+                      <Download size={10} /> 下载
+                    </a>
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         )}
 
