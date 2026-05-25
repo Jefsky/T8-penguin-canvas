@@ -5384,3 +5384,616 @@ onProduce 十三 2 张 url、顺序为 `[originUrl, maskUrl]`，meta `{ type:'ma
 4. **crossOrigin + fetchAndUpload 双保险**：上传表外链 srcUrl 时使 canvas 被 tainted 也能走本地转存路径成功出 mask
 
 ---
+
+## 54. 循环器（LoopNode）+ EXEC 节点完整解决方案（v1.2.9.x 系列总结 · 强制规范）
+
+> **本章是修复其他循环器相关 BUG 与制作新 EXEC 节点的唯一权威依据**。任何新增 / 改造可执行节点（image / video / audio / llm / runninghub / runninghub-wallet / 类似 setInterval 轮询节点）必须**全部通过本章四道防线检查**，否则在循环器中必然出现「失败」「只显示最后一张」「累积被覆盖」等症状。
+
+### 54.1 典型 BUG 症状全景
+
+| 症状 | 根因 | 防线 |
+|---|---|---|
+| 循环器内全部「失败」`成功 0 失败 N` | EXEC 节点 `setInterval` 异步轮询，`handleRun` 提交后立即 return → `useRunTrigger` 提前 `markDone(true)` → `LoopNode.awaitNode` 立即继续 → `extractFromNode` 读不到产物 → `result=null` → `failCount++` | 防线 ① Promise 化 startPolling |
+| 循环器内 `extractFromNode` kind 不匹配返回 null | 用户输入图像但下游是视频节点（kind='image' 但 directs[0] 是 video）→ 读不到 `imageUrl` 返回 null | 防线 ② extractFromNode kind 兜底 |
+| 「成功 N」但 OutputNode 只显示最后一张（覆盖症状） | autoOutput 给 OutputNode 升级 `pickKind='image', pickIndex=0`，循环跑完 `__loopAccumulate` 清除后 `collected.images` 顺序变成 `[fresh_lastRound, ...direct]`，pickIndex=0 把全集砍成 1 张 | 防线 ③ hasAnyDirectAccumulated 短路 |
+| OutputNode 完全空白（循环结束后才被建） | EXEC 节点带 `__loopAccumulate`，autoOutput 跳过它，OutputNode 在循环跑完 finally 清除标记后才被 autoOutput 新建 + upgrade pickKind；此时 `directImageUrls=[]` → `hasAnyDirectAccumulated=false` → pickKind 切割 → 仅显示当前 `ud.imageUrl`（最后一张） | 防线 ④ execAccumulator + finally 兜底 |
+| **多端口节点（FramePair / Suno）循环时所有产物挤在 1 个出口，另一个出口空白** | autoOutput 创建的下游 OutputNode 边没有 `sourceHandle`，handleMap 全是 null → 所有轨道的产物聚合到同一个 OutputNode；同时 LoopNode `acc.auds[]` 把多轨混在一起 → 写回时也不分轨 | **防线 ⑤ 多端口节点 handle-aware autoOutput + accumulator 分轨（v1.2.9.14 新增）** |
+
+
+### 54.2 五道防线（必须全部到位）
+
+#### 防线 ① · EXEC 节点 startPolling 必须 Promise 化
+
+**所有用 `setInterval` / `setTimeout` 异步轮询的 EXEC 节点（AudioNode / VideoNode / SeedanceNode / RunningHubNode / RH-wallet / 未来任何远端任务节点）的 `startPolling` 必须返回 `Promise<void>`**，调用方 `handleRun` / `handleGenerate` 必须 `await` 它。模板：
+
+```ts
+const startPolling = (tid: string): Promise<void> => {
+  stopPoll();
+  return new Promise<void>((resolve, reject) => {
+    pollTimer.current = window.setInterval(async () => {
+      try {
+        const r = await query(tid);
+        if (r.status === 'SUCCESS') {
+          stopPoll();
+          update({ status: 'success', urls: r.urls /* + imageUrl/videoUrl/audioUrl 按后缀分流 */ });
+          resolve();                    // ← 关键：成功才 resolve
+        } else if (r.status === 'FAILED') {
+          stopPoll();
+          update({ status: 'error', error: reason });
+          reject(new Error(reason));    // ← 关键：失败 reject
+        }
+        // RUNNING/POLLING 不 resolve、不 reject，继续 setInterval
+      } catch (e) {
+        // 单次 query 网络错误不直接 reject，下一次 tick 再试；超时才 reject
+      }
+      if (++elapsed > MAX) {
+        stopPoll();
+        reject(new Error('轮询超时'));
+      }
+    }, POLL_INT);
+  });
+};
+
+const handleRun = async () => {
+  // ... submit ...
+  await startPolling(taskId);            // ← 关键：必须 await
+};
+
+useRunTrigger(id, async () => {
+  if (status === 'submitting' || status === 'polling') return;
+  await handleRun();                     // ← 关键：必须 await
+});
+```
+
+**反例（v1.2.9.11/12 之前的 BUG 形态）**：
+
+```ts
+const startPolling = (tid: string) => {
+  pollTimer.current = window.setInterval(...);   // ← BUG: 立即 return，runFn 提前完成
+};
+
+const handleRun = async () => {
+  // submit
+  startPolling(taskId);                          // ← BUG: 不 await
+};
+```
+
+效果：`useRunTrigger` 的 `runFn` 在 `submit` 完成的瞬间就 markDone(true) → `awaitNode` 立即 resolve → `extractFromNode` 读 `imageUrl=''` → `result=null` → 整轮失败。
+
+**对比同步轮询的安全节点**（ImageNode / LLMNode）：
+
+```ts
+for (let i = 0; i < MAX; i++) {
+  const r = await query(tid);
+  if (r.status === 'SUCCESS') break;
+  await new Promise((r) => setTimeout(r, 5000));
+}
+```
+
+这种 for + await 模式天然让 `handleRun` 等到任务完成才 return，**不需要任何 Promise 改造**。
+
+#### 防线 ② · LoopNode.extractFromNode kind 不匹配兜底
+
+[`extractFromNode(node, kind)`](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LoopNode.tsx) 在 `kind='image'` 但终点节点是 video/audio 节点时，**必须遍历所有产物字段任一非空算成功**：
+
+```ts
+function extractFromNode(node, kind) {
+  const ud = node?.data || {};
+  // 优先匹配 kind
+  if (kind === 'image' && (ud.imageUrl || ud.imageUrls?.[0] || ud.urls?.[0])) return ud.imageUrl || ud.imageUrls?.[0] || ud.urls?.[0];
+  if (kind === 'video' && ud.videoUrl) return ud.videoUrl;
+  if (kind === 'audio' && ud.audioUrl) return ud.audioUrl;
+  if (kind === 'text' && (ud.outputText || ud.reply)) return ud.outputText || ud.reply;
+  // v1.2.9.11: kind 不匹配兜底 —— 任何非空产物字段都算成功
+  if (typeof ud.videoUrl === 'string' && ud.videoUrl) return ud.videoUrl;
+  if (typeof ud.audioUrl === 'string' && ud.audioUrl) return ud.audioUrl;
+  if (typeof ud.imageUrl === 'string' && ud.imageUrl) return ud.imageUrl;
+  if (Array.isArray(ud.imageUrls) && ud.imageUrls[0]) return ud.imageUrls[0];
+  if (typeof ud.firstFrameUrl === 'string' && ud.firstFrameUrl) return ud.firstFrameUrl;
+  if (typeof ud.lastFrameUrl === 'string' && ud.lastFrameUrl) return ud.lastFrameUrl;
+  if (typeof ud.outputText === 'string' && ud.outputText) return ud.outputText;
+  if (typeof ud.reply === 'string' && ud.reply) return ud.reply;
+  return null;
+}
+```
+
+#### 防线 ③ · OutputNode hasAnyDirectAccumulated 短路 pickKind 切割
+
+[OutputNode.collected useMemo](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/OutputNode.tsx) 在 pickKind 切割之前必须做累积模式检查：
+
+```ts
+const hasAnyDirectAccumulated =
+  (Array.isArray(d.directImageUrls) && d.directImageUrls.length > 0) ||
+  (Array.isArray(d.directVideoUrls) && d.directVideoUrls.length > 0) ||
+  (Array.isArray(d.directAudioUrls) && d.directAudioUrls.length > 0) ||
+  (typeof d.directOutputText === 'string' && d.directOutputText.length > 0);
+const pickKind = hasAnyDirectAccumulated ? undefined : d.pickKind; // ← 跳过切割
+```
+
+**配套 Canvas autoOutput 跳过 `__loopAccumulate` 节点**（避免不必要 store write）：
+
+```ts
+for (const n of nodes) {
+  // ...
+  if (d.__loopAccumulate) continue; // v1.2.9.10
+}
+```
+
+#### 防线 ④ · LoopNode execAccumulator + finally 兜底（v1.2.9.13 新增）
+
+**根因**：RH/RH-wallet 等带 `__loopAccumulate` 标记的 EXEC 节点，autoOutput 在循环过程中**完全跳过**，下游 OutputNode 直到 finally 清除标记后才被 autoOutput 创建 + upgrade `pickKind='image', pickIndex=0`。此时如果 `directImageUrls` 为空，hasAnyDirectAccumulated=false，pickKind 切割只剩 1 张。
+
+[LoopNode.runSerial](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LoopNode.tsx) 必须维护 `execAccumulator: Map<execId, ExecAcc>`，跨轮持续累积每个 EXEC 节点的 fresh 字段，且 finally 中等待 autoOutput 创建 OutputNode 后再写一次：
+
+```ts
+type ExecAcc = { isFP: boolean; firsts: string[]; lasts: string[]; imgs: string[]; vids: string[]; auds: string[]; txts: string[] };
+const execAccumulator = new Map<string, ExecAcc>();
+
+const harvestFromExec = () => {
+  for (const eid of execSubIds) {
+    const ud = rf.getNode(eid)?.data || {};
+    const acc = ensureAcc(eid);
+    if (isFramePair(ud)) { acc.isFP = true; pushUniqArr(acc.firsts, ud.firstFrameUrl); pushUniqArr(acc.lasts, ud.lastFrameUrl); continue; }
+    pushUniqArr(acc.imgs, ud.imageUrl);
+    ud.imageUrls?.forEach(u => pushUniqArr(acc.imgs, u));
+    ud.urls?.forEach(u => pushUniqArr(acc.imgs, u));
+    pushUniqArr(acc.vids, ud.videoUrl);
+    ud.videoUrls?.forEach(u => pushUniqArr(acc.vids, u));
+    pushUniqArr(acc.auds, ud.audioUrl); pushUniqArr(acc.auds, ud.audioUrl_1);
+    ud.audioUrls?.forEach(u => pushUniqArr(acc.auds, u));
+    pushUniqArr(acc.txts, ud.outputText); pushUniqArr(acc.txts, ud.reply); pushUniqArr(acc.txts, ud.text);
+  }
+};
+
+// writeFreshToOutputs 改读 accumulator 而非当前 ud：
+for (const e of inEdges) {
+  if (!execSubIds.has(e.source)) continue;
+  const acc = execAccumulator.get(e.source); if (!acc) continue;
+  if (acc.isFP) { /* 按 sourceHandle first/last 分流 */ continue; }
+  acc.imgs.forEach(u => pushUniq(fImgs, seenI, u));
+  acc.vids.forEach(u => pushUniq(fVids, seenV, u));
+  acc.auds.forEach(u => pushUniq(fAuds, seenA, u));
+  acc.txts.forEach(t => pushUniq(fTxts, seenT, t));
+}
+
+// 每轮 awaitNode 完成后：
+await setTimeout(30); harvestFromExec(); writeFreshToOutputs(); await setTimeout(20);
+
+// finally 兜底：
+} finally {
+  rf.setNodes(prev => prev.map(/* 清除 __loopAccumulate */));
+  await new Promise(r => setTimeout(r, 200));   // ← 关键：等 autoOutput useEffect 创建 OutputNode
+  harvestFromExec();
+  writeFreshToOutputs();                         // ← 把全集累积写入新建 OutputNode
+}
+```
+
+#### 防线 ⑤ · 多端口节点 handle-aware autoOutput + accumulator 分轨（v1.2.9.14 新增）
+
+**场景**：FramePair（first/last 双图端口）、Suno（audio-0/audio-1 双轨端口）等 EXEC 节点一个 `data` 上同时存两种产物，与多个 `Handle source id="xxx"` 一一映射。
+
+**根因**：
+
+1. Canvas autoOutput 走通用 `pickKind / pickIndex` 路径创建下游 OutputNode，边没有 `sourceHandle` → useUpstreamMaterials 的 handleMap 全部是 `null` → 多端口产物被全部汇聶到同一个 OutputNode。
+2. LoopNode `harvestFromExec` 把多轨产物（`audioUrl` + `audioUrl_1`）混进同一个 `acc.auds[]`；writeFreshToOutputs 也不读 edge.sourceHandle → 虚货全集写到所有 OutputNode。
+3. 用户看到：循环 2 轮 Suno 产生 4 首 → 出口 1 的 OutputNode 显示 4 首、出口 2 空白。
+
+**修复三部件（必须同时完成）**：
+
+**补丁一 · [Canvas.tsx autoOutput 为多端口节点加专属路径](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/Canvas.tsx)**
+
+```ts
+// FramePair 专属路径（v1.2.8.3）
+if (t === 'frame-pair') {
+  const need = ['first', 'last'].filter(h => !usedHandles.has(h));
+  for (const h of need) {
+    toAddNodes.push({ id, type: 'output', data: {} /* 不带 pickKind */ });
+    toAddEdges.push({ source: n.id, target: id, sourceHandle: h }); // ← 关键: 边带 sourceHandle
+  }
+  continue;
+}
+
+// Suno 专属路径（v1.2.9.14 新增）
+if (t === 'audio') {
+  const a0 = d.audioUrl || '';
+  const a1 = d.audioUrl_1 || '';
+  const need = [];
+  if (a0 && !usedHandles.has('audio-0') && !usedHandles.has(null)) need.push('audio-0');
+  if (a1 && !usedHandles.has('audio-1')) need.push('audio-1');
+  for (const h of need) {
+    toAddNodes.push({ id, type: 'output', data: {} });
+    toAddEdges.push({ source: n.id, target: id, sourceHandle: h }); // ← 关键
+  }
+  continue;
+}
+```
+
+**补丁二 · [useUpstreamMaterials.ts / OutputNode.tsx collected 按 sourceHandle 过滤](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/useUpstreamMaterials.ts)**
+
+```ts
+const handles = handleMap.get(sid) || new Set([null]);
+
+// FramePair
+if (isFramePair) {
+  const wantFirst = handles.has('first') || (handles.has(null) && !handles.has('last'));
+  const wantLast  = handles.has('last')  || (handles.has(null) && !handles.has('first'));
+  if (wantFirst) push(ud.firstFrameUrl);
+  if (wantLast)  push(ud.lastFrameUrl);
+  continue;
+}
+
+// Suno (v1.2.9.14)
+if (isSuno) {
+  const wantA0 = handles.has('audio-0') || (handles.has(null) && !handles.has('audio-1'));
+  const wantA1 = handles.has('audio-1') || (handles.has(null) && !handles.has('audio-0'));
+  if (wantA0) push(ud.audioUrl);     // 主轨
+  if (wantA1) push(ud.audioUrl_1);   // 副轨
+  continue;
+}
+```
+
+**补丁三 · [LoopNode.execAccumulator 按轨分存 + writeFreshToOutputs 按 handle 分流](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LoopNode.tsx)**
+
+```ts
+type ExecAcc = {
+  isFP: boolean; firsts: string[]; lasts: string[];        // FramePair: first/last
+  isSuno: boolean; auds0: string[]; auds1: string[];       // Suno: audio-0/audio-1 (v1.2.9.14)
+  imgs: string[]; vids: string[]; auds: string[]; txts: string[]; // 通用
+};
+
+// harvestFromExec
+if (isFramePair(ud)) { acc.isFP = true; pushUniqArr(acc.firsts, ud.firstFrameUrl); pushUniqArr(acc.lasts, ud.lastFrameUrl); continue; }
+if (isSuno(ud))     { acc.isSuno = true; pushUniqArr(acc.auds0, ud.audioUrl); pushUniqArr(acc.auds1, ud.audioUrl_1); continue; }
+
+// writeFreshToOutputs 按 sourceHandle 分流
+for (const e of inEdges) {
+  const acc = execAccumulator.get(e.source); if (!acc) continue;
+  const h = e.sourceHandle;
+  if (acc.isFP) {
+    if (h === 'first' || h == null) acc.firsts.forEach(u => pushUniq(fImgs, ...));
+    if (h === 'last'  || h == null) acc.lasts.forEach(u => pushUniq(fImgs, ...));
+    continue;
+  }
+  if (acc.isSuno) {
+    if (h === 'audio-0' || h == null) acc.auds0.forEach(u => pushUniq(fAuds, ...));
+    if (h === 'audio-1' || h == null) acc.auds1.forEach(u => pushUniq(fAuds, ...));
+    continue;
+  }
+  // 通用路径
+  acc.imgs.forEach(...); acc.vids.forEach(...); acc.auds.forEach(...); acc.txts.forEach(...);
+}
+```
+
+**多端口节点 「三点一体」原则**（制作新多端口节点时必须全部加）：
+
+1. **autoOutput 为每个端口创建独立 OutputNode**，边上带对应 `sourceHandle`（FramePair: 'first'/'last'、Suno: 'audio-0'/'audio-1'）。不走通用 `pickKind/pickIndex` 路径。
+2. **useUpstreamMaterials / OutputNode collected 中按 handleMap 过滤**，跳过通用字段路径避免重复读取。
+3. **LoopNode execAccumulator 加 `is<Kind>` flag 与分轨数组**，`writeFreshToOutputs` 按 `edge.sourceHandle` 路由到对应轨数组。
+
+任何未来多端口节点（例如三轨输出 / 多分辨率输出）都需按同一模式实现这三个补丁，只需增加 `is<Kind>` 标志与对应 handle-id 枚举即可。
+
+### 54.3 制作新 EXEC 节点的强制 Checklist
+
+任何新增可在循环器中执行的节点（**EXEC_TYPES** 里的成员）都必须勾选下列项目，否则在循环器中必然出现 BUG：
+
+- [ ] 节点类型已加入 [LoopNode.tsx EXEC_TYPES](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LoopNode.tsx#L31)、[Canvas.tsx EXEC_TYPES](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/Canvas.tsx#L177)、[NodeActionBar.tsx EXEC_TYPES](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/NodeActionBar.tsx#L25)
+- [ ] 接入 [`useRunTrigger(id, async () => { await handleRun(); })`](file:///e:/PenguinPravite/T8-penguin-canvas/src/hooks/useRunTrigger.ts) **必须 await**
+- [ ] 如果是异步轮询：`startPolling` 必须返回 `Promise<void>`，SUCCESS 走 `resolve()`、FAILED/超时走 `reject(new Error(...))`，handleRun 必须 `await startPolling(...)`
+- [ ] 如果是同步轮询：直接 `for + await Promise(setTimeout)` 即可，handleRun 自然等到完成
+- [ ] 产物字段写入 `update({ imageUrl / imageUrls / urls / videoUrl / audioUrl / audioUrl_1 / outputText / reply / text })` 中至少一项；按 url 后缀（.png/.mp4/.mp3）分流到对应字段，避免视频 url 进 `imageUrl`
+- [ ] handleRun 入口加重入保护：`if (status === 'submitting' || status === 'polling') return;`
+- [ ] handleRun 开始时清空上一轮的产物字段（`urls: [], taskId: null`），防止 stale 干扰
+- [ ] **多端口节点（一个 data 上出两个产物字段 + 两个 Handle source id）额外必须：**
+  - [ ] Canvas autoOutput 加专属路径，为每个端口创建 OutputNode 且边带 `sourceHandle`
+  - [ ] useUpstreamMaterials 与 OutputNode collected 加 `is<Kind>` 分支，按 handleMap 过滤输出
+  - [ ] LoopNode `ExecAcc` 加 `is<Kind>` flag + 分轨数组；harvestFromExec 分轨累积；writeFreshToOutputs 按 `edge.sourceHandle` 路由
+- [ ] 新建一个测试画布：上游 2 个素材 → 循环器 → 新节点 → （手动 / 不连）OutputNode，跑一次串联循环，验证 OutputNode 显示完整 N 张产物（不是只显示最后一张，也不是失败）
+
+### 54.4 全部 16 个 EXEC 节点循环器兼容性矩阵（最终态）
+
+| 节点类型 | 轮询方式 | 修复版本 | 状态 |
+|---|---|---|---|
+| `image` | 同步 for+await Promise | — | ✓ 一开始就正常 |
+| `edit` (multi-angle-3d/panorama-720/penguin-portrait) | 同步 | — | ✓ 一开始就正常 |
+| `llm` | 流式 await | — | ✓ 一开始就正常 |
+| `frame-pair` | 同步 | v1.2.9.10 | ✓ 修复 pickKind 切割 |
+| `audio` | setInterval → Promise | v1.2.9.11 | ✓ |
+| `video` | setInterval × 2 → Promise | v1.2.9.11 | ✓ |
+| `seedance` | setInterval → Promise | v1.2.9.11 | ✓ |
+| `runninghub` | setInterval → Promise | v1.2.9.12 | ✓ |
+| `runninghub-wallet` | 复用 RunningHubNode | v1.2.9.12 | ✓ 同一组件 |
+| `resize / upscale / grid-crop / remove-bg / combine` | 同步 imageOps | — | ✓ |
+| `frame-extractor` | 同步 | — | ✓ |
+| `upload` | 同步本地缓存 | — | ✓ |
+| **finally 兜底（覆盖最后一张）** | LoopNode execAccumulator + finally 200ms 后 write | **v1.2.9.13** | ✓ 解决「循环结束后才创建 OutputNode 只显示最后一张」 |
+| **多端口节点（FramePair / Suno）多轨混装问题** | autoOutput handle-aware + accumulator 分轨 + collected 按 handle 过滤 | **v1.2.9.14** | ✓ 解决「Suno 循环 2 轮 → 出口 1 显示 4 首、出口 2 空白」 |
+
+### 54.5 v1.2.9.x 版本演进表
+
+| 版本 | 关键修复 | 解决问题 |
+|---|---|---|
+| v1.2.9.0~v1.2.9.7 | 累积机制多次试错 | 历史包袱 |
+| v1.2.9.8 | LoopNode 主动 functional setNodes 写 OutputNode | FramePair 累积 OK |
+| v1.2.9.9 | discoverOutputNodeIds 动态发现 + knownOutputs | 运行中创建的 OutputNode 也能写入 |
+| v1.2.9.10 | hasAnyDirectAccumulated 短路 + autoOutput 跳过 `__loopAccumulate` | ImageNode/LLMNode 覆盖修复 |
+| v1.2.9.11 | startPolling Promise 化 + extractFromNode kind 兜底 | AudioNode/VideoNode/SeedanceNode 失败修复 |
+| v1.2.9.12 | RunningHubNode startPolling Promise 化 | RH/RH-wallet 失败修复 |
+| **v1.2.9.13** | **execAccumulator 跨轮累积 + finally 兜底 writeback** | **RH/RH-wallet 循环结束后才建 OutputNode 覆盖修复（全部 16 节点完美兼容）** |
+| **v1.2.9.14** | **多端口节点 handle-aware autoOutput + accumulator 分轨（FramePair/Suno 三点一体）** | **Suno 双轨产物在循环中不再混装出口 1，各轨独立累积到对应 audio-0/audio-1 OutputNode** |
+
+### 54.6 防止再回归的代码注释锚点
+
+四道防线在源码中有显眼注释锚点，未来任何重构必须保留：
+
+- `v1.2.9.10`：[OutputNode.tsx#L264-L277 hasAnyDirectAccumulated 累积模式短路](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/OutputNode.tsx)
+- `v1.2.9.10`：[Canvas.tsx#L1915-L1919 autoOutput 跳过 `__loopAccumulate`](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/Canvas.tsx)
+- `v1.2.9.11`：[LoopNode.tsx extractFromNode kind 兜底](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LoopNode.tsx)
+- `v1.2.9.11`：[AudioNode/VideoNode/SeedanceNode startPolling 改 Promise](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/AudioNode.tsx)
+- `v1.2.9.12`：[RunningHubNode.tsx#L389-L468 startPolling 改 Promise](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/RunningHubNode.tsx)
+- `v1.2.9.13`：[LoopNode.tsx execAccumulator + harvestFromExec + finally 200ms writeback](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LoopNode.tsx)
+- `v1.2.9.14`：[Canvas.tsx autoOutput Suno 专属路径（audio-0 / audio-1 sourceHandle）](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/Canvas.tsx)
+- `v1.2.9.14`：[useUpstreamMaterials.ts isSuno 双轨 handle 过滤](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/useUpstreamMaterials.ts)
+- `v1.2.9.14`：[OutputNode.tsx collected isSuno 双轨 handle 过滤](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/OutputNode.tsx)
+- `v1.2.9.14`：[LoopNode.tsx ExecAcc 加 isSuno + auds0/auds1 + writeFreshToOutputs handle 分流](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/LoopNode.tsx)
+
+### 54.7 经验教训（一句话总结）
+
+1. **Promise 化是异步轮询节点的入场券**：不返回 Promise / 不 await 就一定 race。
+2. **`__loopAccumulate` 标记会让 autoOutput 跳过节点**：意味着循环结束前 OutputNode 可能根本不存在；finally 兜底必不可少。
+3. **`hasAnyDirectAccumulated` 是覆盖症状的最后一道墙**：即使 autoOutput 给 OutputNode 升级了 pickKind，只要 directImageUrls 非空就跳过切割。
+4. **跨轮 accumulator 而非当前 ud**：跑到第 N 轮时 ud 只剩最后一轮值，靠 ud 写 OutputNode 永远只能拿到最后一张。
+5. **execAccumulator 同时支持 FramePair `isFP` 双图分流与 Suno `isSuno` 双轨分流**：sourceHandle='first'/'last' / 'audio-0'/'audio-1' 各取对应数组；任何多端口节点需同三点一体修复（autoOutput 带 handle / collected 滤 handle / accumulator 按轨）。
+6. **finally 中 setTimeout(200) 不是黑魔法**：是给 autoOutput useEffect 一个 commit 周期把新 OutputNode 落 store。
+
+---
+
+## 55. 后端「分类 API Key 专属优先 fallback 通用」修复（v1.2.9.15 · 强制规范）
+
+### 背景与症状
+用户在【设置】界面填写 Suno 专属 API Key 后，将「贞贞工坊通用 API Key」故意改成错误值 `'123'`，点击 Suno 节点生成 → 上游报「令牌错误」。即
+
+> 「专属 APIKEY 没有生效，无论 Suno 单个还是整个分类 key 体系都失效。」
+
+根因排查后定位到 backend/src/routes/proxy.js **3 类同模式 bug**：
+
+#### Bug ① 子路由完全缺失 applyClassifiedKey（最严重）
+```js
+// audio/upload 旧实现：
+router.post('/audio/upload', ..., async (req, res) => {
+  const settings = loadRawSettings();
+  if (!settings?.zhenzhenApiKey) return res.status(400)...;
+  // ❌ 完全没调 applyClassifiedKey('suno')
+  const apiKey = settings.zhenzhenApiKey; // ← 拿到错误的 '123'
+  // ...直接拿通用 key 上传 → 令牌错误
+});
+```
+Suno cover/extend 上传步骤即使 sunoApiKey 配置正确也始终用错误的 zhenzhenApiKey。
+
+#### Bug ② 检查顺序错误（边缘场景）
+```js
+// 旧顺序：先校验通用 key 非空 → 再 applyClassifiedKey
+if (!settings?.zhenzhenApiKey) return res.status(400).json({ error: '未配置...' });
+applyClassifiedKey(settings, 'suno');
+```
+用户「只填了专属 key、留空通用 key」时被误拦在第一步，永远跑不到 applyClassifiedKey。
+
+#### Bug ③ 错误提示混淆
+旧错误信息只说「未配置贞贞工坊 API Key」，没区分通用 key 与专属 key，用户配了专属还看到这个提示极易误判。
+
+### 一体化修复方案：`ensureKey` helper
+
+紧接 `applyClassifiedKey` 之后定义统一的「应用专属 → 校验 effective → 错误响应」一体化 helper：
+
+```js
+// backend/src/routes/proxy.js
+function ensureKey(settings, res, hint, label) {
+  if (!settings) {
+    res.status(400).json({ success: false, error: '未找到 settings 文件，请先在【设置】中配置 API Key' });
+    return false;
+  }
+  applyClassifiedKey(settings, hint || ''); // 先应用专属
+  if (!settings.zhenzhenApiKey) {           // 后校验 effective
+    const tip = label
+      ? `未配置 ${label} 专属 API Key，且贞贞工坊通用 API Key 也为空（请在【设置】中至少填写其中一个）`
+      : '未配置贞贞工坊 API Key（请在【设置】中填写）';
+    res.status(400).json({ success: false, error: tip });
+    return false;
+  }
+  return true;
+}
+```
+
+**调用模板**（所有分类 key 路由统一遵循）：
+```js
+router.post('/xxx/yyy', async (req, res) => {
+  const settings = loadRawSettings();
+  const { /* body 提取 */ } = req.body || {};
+  // ① 一体化「专属优先 fallback 通用」校验
+  if (!ensureKey(settings, res, hint, '业务标签')) return;
+  // ② 后续直接用 settings.zhenzhenApiKey 即可（已是 effective key）
+  const apiKey = settings.zhenzhenApiKey;
+  // ...
+});
+```
+
+### 修复矩阵（v1.2.9.15 全局应用，共 16 个路由）
+
+| # | 路由 | hint 来源 | label |
+|---|------|----------|-------|
+| 1 | POST /image | `apiModel \|\| model` | 图像 |
+| 2 | POST /image/submit | `apiModel \|\| model` | 图像 |
+| 3 | GET /image/status/:tid | remembered key 优先；否则 `query.model` | 图像 |
+| 4 | POST /image/fal/submit | `apiModel` | 图像 FAL |
+| 5 | POST /image/fal/query | `endpoint \|\| rawUrl` | 图像 FAL |
+| 6 | POST /mj/imagine | `'mj'` | MJ |
+| 7 | GET /mj/task/:id | `'mj'` | MJ |
+| 8 | POST /mj/upload | `'mj'` | MJ |
+| 9 | POST /video/fal/submit | `apiModel` | 视频 FAL |
+| 10 | POST /video/fal/query | `endpoint \|\| rawUrl` | 视频 FAL |
+| 11 | POST /video/submit | `model` | 视频 |
+| 12 | GET /video/query | remembered key 优先；否则 `query.model` | 视频 |
+| 13 | POST /seedance/submit | `'seedance'` | Seedance |
+| 14 | GET /seedance/query | `'seedance'` | Seedance |
+| 15 | POST /audio/submit | `'suno'` | Suno |
+| 16 | GET /audio/query | `'suno'` | Suno |
+| 17 | POST /audio/upload | `'suno'`（**Bug ① 修复点**） | Suno |
+
+### 不受影响的路由
+- `/llm` 用独立的 `settings.llmApiKey`（不参与 zhenzhenApiKey 分类体系）
+- `/runninghub/*` 用独立的 `settings.rhApiKey` / `settings.rhWalletApiKey`
+
+### 强制规范（写后端 zhenzhenApiKey 路由必读）
+
+- ✅ **唯一入口**：所有读取 `settings.zhenzhenApiKey` 之前**必须** `if (!ensureKey(settings, res, hint, label)) return;`
+- ✅ **hint 优先级**：能拿到具体 model（apiModel / model）就传 model；纯分类路由（mj/seedance/suno）传分类字符串
+- ✅ **remembered key 优先**：异步轮询查询路由（image/status、video/query）若 `recallTaskKey(taskId)` 命中则直接覆盖 `settings.zhenzhenApiKey`，**不再调用 ensureKey**（remembered 自身保证有 key）
+- ❌ **严禁旧顺序**：`if (!settings?.zhenzhenApiKey) return ...; applyClassifiedKey(settings, hint);` ——会让「只配专属」用户被误拦
+- ❌ **严禁裸跑**：直接 `Bearer ${settings.zhenzhenApiKey}` 而不先 applyClassifiedKey ——audio/upload 那种 Bug 会重现
+- ❌ **严禁混淆错误提示**：必须明确「专属 + 通用」双重校验语义
+
+### 教训
+1. **applyClassifiedKey 是「覆盖」而不是「读取」**：调用后 `settings.zhenzhenApiKey` 已被分类 key 覆盖，所以校验必须在 apply **之后**。
+2. **多步骤业务（提交+轮询+上传）必须每步都 ensureKey**：Suno 需要 submit / query / upload 三个路由都修复，遗漏任何一个都会让链路失败。
+3. **错误信息是 UX 一部分**：用户看到「未配置贞贞工坊 API Key」会立刻去填通用 key，而真正的问题是专属 key —— 错误提示必须双重明示。
+
+---
+
+## 56. RH APIKEY 统一 + 设置面板「获取 APIKey」按钮（v1.2.9.16 · 强制规范）
+
+### 需求背景
+v1.1.x 时期为十分严谨设计，RH 钱包应用节点使用独立的 `rhWalletApiKey`（企业级共享 APIKEY）与普通 RunningHub 节点的 `rhApiKey` 分开计费，后端 `pickRhApiKey(settings, useWallet)` 根据 useWallet 标志路由，未配置时报「未配置 RH 钱包 APIKEY」不 fallback rhApiKey 避免漏费频道。
+
+但这增加了两重问题：
+1. **用户认知成本高** —— 设置面板同时出现「RunningHub APIKEY」 + 「RH 钱包 APIKEY」两个字段，不清楚差别的用户会重复填入同一个 key。
+2. **获取入口难找** —— 用户不知道去哪里注册 RunningHub / 贞贞工坊 APIKEY，需要在设置面板直接提供入口。
+
+### 不变量（strong invariants）
+- 画布上 `runninghub` 与 `runninghub-wallet` 依然是两个独立节点类型，**UI 差异保留**（标题 / 图标 / 颜色）以便用户识别场景
+- 后端 4 条 RH 路由的签名、请求体、响应体 schema 零变动
+- 老 settings.json 中残留的 `rhWalletApiKey` 字段仅被 `loadSettings` 允许（不会报错），**运行时完全不被任何路由消费**——向后兼容
+
+### 修改矩阵（8 个文件）
+
+| # | 文件 | 改动要点 |
+|---|------|---------|
+| 1 | [`backend/src/routes/proxy.js`](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/routes/proxy.js) | `pickRhApiKey(settings)` 简化为单参 · `missingRhKeyError()` 文案统一 · 4 路由不再读 useWallet/wallet=1 |
+| 2 | [`backend/src/routes/settings.js`](file:///e:/PenguinPravite/T8-penguin-canvas/backend/src/routes/settings.js) | DEFAULT_SETTINGS 与 GET 脱敏返回移除 `rhWalletApiKey` 字段 |
+| 3 | [`src/types/canvas.ts`](file:///e:/PenguinPravite/T8-penguin-canvas/src/types/canvas.ts) | ApiSettings 接口移除 `rhWalletApiKey: string` |
+| 4 | [`src/stores/apiKeys.ts`](file:///e:/PenguinPravite/T8-penguin-canvas/src/stores/apiKeys.ts) | DEFAULT 对象移除 `rhWalletApiKey: ''` |
+| 5 | [`src/services/generation.ts`](file:///e:/PenguinPravite/T8-penguin-canvas/src/services/generation.ts) | `RhSubmitRequest` 接口去 useWallet · `queryRh/fetchRhAppInfo/uploadRhAsset` 3 函数去形参 · URL 不再拼 `&wallet=1` |
+| 6 | [`src/components/nodes/RunningHubNode.tsx`](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/nodes/RunningHubNode.tsx) | `useWallet = type === 'runninghub-wallet'` 仅作 UI 区分；4 处调用去 useWallet 透传 |
+| 7 | [`src/components/ApiSettings.tsx`](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/ApiSettings.tsx) | KeyField/COMMON_KEYS/emptyMap/emptyShow 同步瘦身 · 新增 `linkBtnCls/linkBtnAltCls/openExternal/renderGetKeyButtons` · baseUrlNote 升级为 flex-wrap 容器 |
+| 8 | [`src/components/Canvas.tsx`](file:///e:/PenguinPravite/T8-penguin-canvas/src/components/Canvas.tsx) + [`src/config/nodeRegistry.ts`](file:///e:/PenguinPravite/T8-penguin-canvas/src/config/nodeRegistry.ts) | 注释 / description 同步为「与 RunningHub 节点共用 RunningHub APIKEY」 |
+
+### 后端统一 helper
+```js
+// backend/src/routes/proxy.js
+// v1.2.9.16: 取消 rhWalletApiKey 单独字段 —— 普通 RH 节点 与 RH 钱包应用节点
+//            统一使用 settings.rhApiKey，简化用户配置心智。
+function pickRhApiKey(settings) {
+  return settings?.rhApiKey || settings?.runninghubApiKey || '';
+}
+function missingRhKeyError() {
+  return '未配置 RunningHub API Key（请在设置中填写 RunningHub API Key）';
+}
+```
+4 路由调用方统一改为 `pickRhApiKey(settings)` + `missingRhKeyError()`。
+
+### 前端「获取 APIKey」按钮双主题样式
+```tsx
+const linkBtnCls = isPixel
+  ? 'px-btn px-btn--mint flex items-center gap-1 text-[11px] px-2 py-1'
+  : `flex items-center gap-1 text-[11px] px-2 py-1 rounded-md transition border ${
+      isDark
+        ? 'border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-200'
+        : 'border-emerald-500/40 bg-emerald-50 hover:bg-emerald-100 text-emerald-700'
+    }`;
+const linkBtnAltCls = isPixel
+  ? 'px-btn flex items-center gap-1 text-[11px] px-2 py-1'
+  : `flex items-center gap-1 text-[11px] px-2 py-1 rounded-md transition border ${
+      isDark
+        ? 'border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-200'
+        : 'border-cyan-500/40 bg-cyan-50 hover:bg-cyan-100 text-cyan-700'
+    }`;
+const openExternal = (url: string) => {
+  try { window.open(url, '_blank', 'noopener,noreferrer'); } catch {}
+};
+```
+
+### 「获取 APIKey」路由表
+| 字段 | 按钮 | 点击后跳转链接 |
+|------|------|--------------|
+| `zhenzhenApiKey` | 获取 APIKey | https://ai.t8star.org/register?aff=dP7j |
+| `rhApiKey` (主) | 获取 APIKey：国内用户 | https://www.runninghub.cn/user-center/1819214514410942465/webapp?inviteCode=rh-v1121 |
+| `rhApiKey` (次) | 国外用户 | https://www.runninghub.ai/user-center/1819214514410942465/webapp?inviteCode=rh-v1121 |
+| `llmApiKey` | — | 不提供（LLM 与贞贞同源，贞贞按钮已足） |
+
+### baseUrlNote 容器升级
+```tsx
+{(opts.baseUrlNote || renderGetKeyButtons(spec.field)) && (
+  <div className={`flex items-center gap-2 flex-wrap text-[11px] ${hintCls}`}>
+    {opts.baseUrlNote && (
+      <span className="flex items-center gap-1.5">
+        <Lock size={11} /> {opts.baseUrlNote}
+      </span>
+    )}
+    {renderGetKeyButtons(spec.field)}
+  </div>
+)}
+```
+`flex-wrap` 保证窄画布 / 小屏幕下 Lock 备注与按钮可自动换行不拥挤。
+
+### 强制规范（RH 节点重构 / 新加外部链接必读）
+
+- ✅ **统一 Key 入口**：后端读 RH key 必须走 `pickRhApiKey(settings)`，严禁出现 `settings.rhWalletApiKey` 读取
+- ✅ **路由不再读 useWallet**：4 条 RH 路由 (`/runninghub/{submit,query,app-info,upload-asset}`) 严禁从 body / query 读 `useWallet` 或 `wallet=1`，避免复活旧分路
+- ✅ **前端 API 套务单一参数**：`submitRh / queryRh / fetchRhAppInfo / uploadRhAsset` 严禁加回 useWallet 形参
+- ✅ **外部链接安全打开**：`window.open(url, '_blank', 'noopener,noreferrer')` 必须同时带 `noopener,noreferrer`，防止 reverse tabnabbing
+- ✅ **双主题适配**：任何新增设置面板按钮必须同时提供默认主题（`isPixel ? × : ×`）两套外观，严禁裸 className
+- ❌ **严禁复活「RH 钱包 APIKEY」设置项**：任何提议「为 RH 钱包单独加回 Key」的重构 PR 必须被拒绝，除非产品层面明确需要付费分渠隔离
+- ❌ **严禁从 settings.json 删除老字段**：loadSettings 仍该允许老用户 settings.json 存在 `rhWalletApiKey`，仅运行时不读
+
+### 向后兼容验收清单
+- [ ] 老用户启动后，APIKEY 设置面板仅看到 3 项（贞贞 / RH / LLM），**不会报错**
+- [ ] 老用户原有 RH 钱包应用节点可以直接提交运行（走 settings.rhApiKey）
+- [ ] 点击 3 个「获取 APIKey」按钮都能新窗口打开对应 URL
+- [ ] 三个主题×两个外观 = 12 种组合下按钮表现都识别可点
+
+### 教训
+1. **产品层面的字段拆分 ≠ 技术层面的路由拆分**：v1.1.x 的 rhWalletApiKey 在后端设计上是合理的，但在 UX 上增加了认知负担 —— 统一后用户只需填一个 Key。
+2. **字段移除必须同时考虑向后兼容**：DEFAULT_SETTINGS 移除不代表 loadSettings 要严拒老字段，同一代码路径不读老字段即可。
+3. **外部链接如果带邀请参数应供产品定义**：`inviteCode=rh-v1121` 在 features.json/skill.md/UI 代码三处同步，避免被中间人错误修改。
+
+### ⚠️ 版本号 semver 兼容陷阱（重要补记）
+
+**背景**：v1.2.9.16 首次打包时遇到错误：`Invalid version: "1.2.9.16"`。
+
+**原因**：electron-builder 严格遵循 **semver 3 段语义**（`MAJOR.MINOR.PATCH[-pre][+build]`），不接受 4 段版本号。本项目从 v1.2.9.0 起在 features.json/skill.md/title/__APP_VERSION__ 上均使用 4 段（只是 display 文本），但 package.json 被误同步为 4 段，导致打包失败。
+
+**解决方案**（v1.2.9.16 起强制）：
+
+| 位置 | 格式 | 示例 | 说明 |
+|---|---|---|---|
+| `package.json::version` | semver 3 段 | `1.2.916` | electron-builder 必须。`9.16` 拼接为 `916` 保语义递增 |
+| `vite.config.ts::__APP_VERSION__` | display 4 段 | `1.2.9.16` | Sidebar / Setting / 帮助面板读取 |
+| `electron/main.cjs::title` | display 4 段 | `v1.2.9.16` | 窗口标题 |
+| `electron/main.cjs::log窗口` | display 4 段 | `v1.2.9.16` | 启动 HTML |
+| `electron/main.cjs::IPC version` | display 4 段 | `1.2.9.16` | `t8pc:get-info` 返回 |
+| `README.md::badge` | display 4 段 | `v1.2.9.16` | 读者可见 |
+| `features.json::version` | display 4 段 | `1.2.9.16` | 项目语义版本 |
+| `features.json::packaging.version` | display 4 段 | `1.2.9.16` | 同上 |
+| `features.json::packaging.semverVersion` | semver 3 段 | `1.2.916` | 新增，记录 package.json 实际值 |
+| `features.json::packaging.installer` | semver 3 段 | `T8-PenguinCanvas-Setup-1.2.916.exe` | 实际 NSIS 产物名以 package.json 为准 |
+
+**拼接规则**：4 段 `A.B.C.D` → semver `A.B.<C><D>`，例：
+- `1.2.9.16` → `1.2.916`
+- `1.2.9.17` → `1.2.917`
+- `1.2.10.0`  → `1.2.1000`（警告：如 D 超16位需提前跳 minor）
+- 推荐到达 `1.2.9.99` 后跳到 `1.3.0`，避免 C 跳到 10 造成 D 冲突
+
+**必遵检查点**：
+- [ ] 升版同时同步 8 个位置，**只有 package.json::version 用 semver 3 段拼接格式**
+- [ ] features.json::packaging 同时保留 `version`（4段） + `semverVersion`（3段） + `installer`（3段）
+- [ ] 推送前用 `npm run dist:dir` 验证能启动再走 NSIS 完整打包
+
+---

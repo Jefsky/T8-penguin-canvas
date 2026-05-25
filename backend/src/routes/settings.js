@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
   zhenzhenBaseUrl: config.ZHENZHEN_BASE_URL, // 固定 https://ai.t8star.org
   rhApiKey: '',
   rhBaseUrl: config.RH_BASE_URL,
+  // v1.2.9.16: 取消 rhWalletApiKey —— RH 钱包应用节点与普通 RunningHub 节点统一使用 rhApiKey
   llmApiKey: '',
   llmBaseUrl: config.ZHENZHEN_BASE_URL, // 同贞贞工坊上游
   // 分类 Key（留空时 fallback 到 zhenzhenApiKey）

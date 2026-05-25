@@ -689,6 +689,8 @@ export async function uploadAudioForSuno(
 
 // ========================================================================
 // RunningHub 工作流(异步)
+// v1.2.9.16: 取消 rhWalletApiKey / useWallet 分路 ——
+// RH 钱包应用节点与普通 RunningHub 节点统一使用 settings.rhApiKey。
 // ========================================================================
 export interface RhSubmitRequest {
   webappId: string;
@@ -715,14 +717,16 @@ export interface RhQueryResult {
 }
 
 export async function queryRh(taskId: string): Promise<RhQueryResult> {
-  const r = await fetch(`/api/proxy/runninghub/query?taskId=${encodeURIComponent(taskId)}`);
+  const url = `/api/proxy/runninghub/query?taskId=${encodeURIComponent(taskId)}`;
+  const r = await fetch(url);
   const data = await r.json();
   if (!r.ok || !data.success) throw new Error(data?.error || `HTTP ${r.status}`);
   return data.data;
 }
 
 export async function fetchRhAppInfo(webappId: string): Promise<any> {
-  const r = await fetch(`/api/proxy/runninghub/app-info?webappId=${encodeURIComponent(webappId)}`);
+  const url = `/api/proxy/runninghub/app-info?webappId=${encodeURIComponent(webappId)}`;
+  const r = await fetch(url);
   const data = await r.json();
   if (!r.ok || !data.success) throw new Error(data?.error || `HTTP ${r.status}`);
   return data.data;
@@ -730,7 +734,7 @@ export async function fetchRhAppInfo(webappId: string): Promise<any> {
 
 /**
  * 上传任意本地/远程素材到 RunningHub，拿到内部 fileName。
- * 用于 RhConfigNode 中 valueType=image|video|audio 的条目提交前的资源转换。
+ * 用于 RhConfigNode / RunningHubNode 中 valueType=image|video|audio 的条目提交前的资源转换。
  */
 export async function uploadRhAsset(url: string): Promise<{ fileName: string; fileType: string }> {
   const r = await fetch('/api/proxy/runninghub/upload-asset', {
