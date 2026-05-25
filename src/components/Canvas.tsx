@@ -1943,6 +1943,9 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
     const toAddNodes: Node[] = [];
     const toAddEdges: Edge[] = [];
     const newSigPatches: Array<[string, string]> = [];
+    // v1.2.10.5-hotfix: 同一次 effect 内多个源节点补建的 OutputNode 之间互不可见 (nodes 快照不包含本轮刚 push 的节点),
+    // 会导致多源场景下新 OutputNode 之间重叠。累积到 pendingPlacedNodes, 每次避让合并进 existing。
+    const pendingPlacedNodes: Node[] = [];
 
     for (const n of nodes) {
       const t = n.type as string;
@@ -1986,17 +1989,19 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
         const _desiredFP: PlacementRect[] = need.map((_, i) => ({
           x: baseX, y: baseY + i * 360, w: _szFP.w, h: _szFP.h,
         }));
-        const _offFP = placeBatchNodes(_desiredFP, nodes, { source: 'placement:auto-frame-pair' });
+        const _offFP = placeBatchNodes(_desiredFP, [...nodes, ...pendingPlacedNodes], { source: 'placement:auto-frame-pair' });
         for (let i = 0; i < need.length; i++) {
           const h = need[i];
           const newId = `output-auto-${n.id}-${Date.now()}-${h}-${Math.random().toString(36).slice(2, 6)}`;
-          toAddNodes.push({
+          const _newNode: Node = {
             id: newId,
             type: 'output',
             position: { x: baseX + _offFP.dx, y: baseY + i * 360 + _offFP.dy },
             data: {}, // 不带 pickKind/pickIndex, 让 useUpstreamMaterials 按 sourceHandle 过滤
             selected: false,
-          } as Node);
+          } as Node;
+          toAddNodes.push(_newNode);
+          pendingPlacedNodes.push(_newNode);
           toAddEdges.push({
             id: `e-auto-${newId}`,
             source: n.id,
@@ -2036,17 +2041,19 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
         const _desiredSU: PlacementRect[] = need.map((_, i) => ({
           x: baseX, y: baseY + i * 360, w: _szSU.w, h: _szSU.h,
         }));
-        const _offSU = placeBatchNodes(_desiredSU, nodes, { source: 'placement:auto-suno' });
+        const _offSU = placeBatchNodes(_desiredSU, [...nodes, ...pendingPlacedNodes], { source: 'placement:auto-suno' });
         for (let i = 0; i < need.length; i++) {
           const h = need[i];
           const newId = `output-auto-${n.id}-${Date.now()}-${h}-${Math.random().toString(36).slice(2, 6)}`;
-          toAddNodes.push({
+          const _newNode: Node = {
             id: newId,
             type: 'output',
             position: { x: baseX + _offSU.dx, y: baseY + i * 360 + _offSU.dy },
             data: {}, // 不带 pickKind/pickIndex。由 useUpstreamMaterials/OutputNode collected 按 sourceHandle 滤
             selected: false,
-          } as Node);
+          } as Node;
+          toAddNodes.push(_newNode);
+          pendingPlacedNodes.push(_newNode);
           toAddEdges.push({
             id: `e-auto-${newId}`,
             source: n.id,
@@ -2187,7 +2194,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
           w: _szGen.w, h: _szGen.h,
         };
       });
-      const _offGen = placeBatchNodes(_desiredGen, nodes, { source: 'placement:auto-output' });
+      const _offGen = placeBatchNodes(_desiredGen, [...nodes, ...pendingPlacedNodes], { source: 'placement:auto-output' });
 
       for (let i = 0; i < needCount; i++) {
         const item = remainingItems[i];

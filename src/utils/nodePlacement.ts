@@ -180,8 +180,68 @@ export function collectRects(nodes: Node[], excludeIds?: Set<string>): Rect[] {
 }
 
 /**
+ * v1.2.10.5-hotfix: 自适应 step 计算
+ * 取参与碰撞的所有矩形(desired + existing) 最大维度 + gap, 保证 spiral 一步即可跨出最大节点。
+ * 兜底不小于 fallback (默认 PLACEMENT_STEP=80) 防止全空场景 step=0。
+ *
+ * 之前 bug: 默认 step=80 远小于 OutputNode 等大节点 (320x360),
+ * spiral 前 20+ 步全在节点内部反复横跳, 64 步都走不出去, 落点仍重叠。
+ */
+function computeAdaptiveStep(rects: Rect[], gap: number, fallback: number): number {
+  let maxDim = fallback;
+  for (const r of rects) {
+    const w = r.w + gap;
+    const h = r.h + gap;
+    if (w > maxDim) maxDim = w;
+    if (h > maxDim) maxDim = h;
+  }
+  return maxDim;
+}
+
+/** spiral 单 pass 搜索: 找到无重叠 candidate 即返回 {x,y}, 否则 null */
+function spiralSearchSingle(
+  desired: Rect,
+  existing: Rect[],
+  step: number,
+  maxTries: number,
+  gap: number
+): { x: number; y: number } | null {
+  for (const off of spiralOffsets(step, maxTries)) {
+    const candidate: Rect = { x: desired.x + off.dx, y: desired.y + off.dy, w: desired.w, h: desired.h };
+    if (!anyIntersect(candidate, existing, gap)) {
+      return { x: candidate.x, y: candidate.y };
+    }
+  }
+  return null;
+}
+
+/** spiral 单 pass 搜索 (整组): 找到所有矩形都无重叠的公共偏移即返回 {dx,dy}, 否则 null */
+function spiralSearchBatch(
+  desiredRects: Rect[],
+  existing: Rect[],
+  step: number,
+  maxTries: number,
+  gap: number
+): { dx: number; dy: number } | null {
+  for (const off of spiralOffsets(step, maxTries)) {
+    let ok = true;
+    for (const r of desiredRects) {
+      const cand: Rect = { x: r.x + off.dx, y: r.y + off.dy, w: r.w, h: r.h };
+      if (anyIntersect(cand, existing, gap)) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return { dx: off.dx, dy: off.dy };
+  }
+  return null;
+}
+
+/**
  * 单节点避让 — 期望落点 desired, 现有节点矩形 existing,
  * 螺线找无重叠位置, 失败走最右兜底。
+ *
+ * v1.2.10.5-hotfix: 双 pass 搜索 —— 先小 step (紧凑空隙), 再自适应大 step (跨越大节点)。
  *
  * @returns 最终落点 (x, y) — 节点左上角坐标。
  */
@@ -191,14 +251,19 @@ export function resolveSingleSpawn(
   opts: PlacementOptions = {}
 ): { x: number; y: number } {
   const gap = opts.gap ?? PLACEMENT_GAP;
-  const step = opts.step ?? PLACEMENT_STEP;
+  const baseStep = opts.step ?? PLACEMENT_STEP;
   const maxTries = opts.maxTries ?? PLACEMENT_MAX_TRIES;
 
-  for (const off of spiralOffsets(step, maxTries)) {
-    const candidate: Rect = { x: desired.x + off.dx, y: desired.y + off.dy, w: desired.w, h: desired.h };
-    if (!anyIntersect(candidate, existing, gap)) {
-      return { x: candidate.x, y: candidate.y };
-    }
+  // Pass 1: 紧凑搜索 (小 step, 找近邻空隙)
+  const pass1Tries = Math.min(24, maxTries);
+  const hit1 = spiralSearchSingle(desired, existing, baseStep, pass1Tries, gap);
+  if (hit1) return hit1;
+
+  // Pass 2: 自适应大 step (跨越大节点)
+  const adaptStep = computeAdaptiveStep([desired, ...existing], gap, baseStep);
+  if (adaptStep > baseStep) {
+    const hit2 = spiralSearchSingle(desired, existing, adaptStep, maxTries, gap);
+    if (hit2) return hit2;
   }
 
   // 兜底: 所有现有节点最右侧 + gap, y 取期望 y
@@ -208,6 +273,8 @@ export function resolveSingleSpawn(
 /**
  * 整组避让 — N 个 desiredRect 作为一个组, 找到一个公共偏移 (dx,dy)
  * 让整组都不与 existing 相交。保持组内相对布局不变 (适合 9 宫格 / 多链克隆)。
+ *
+ * v1.2.10.5-hotfix: 双 pass 搜索 —— 先小 step (紧凑空隙), 再自适应大 step (跨越大节点)。
  *
  * @returns 整组要平移的偏移 (dx, dy)。调用方对每个 desiredRect 加上该偏移即可。
  */
@@ -219,19 +286,19 @@ export function resolveBatchSpawn(
   if (desiredRects.length === 0) return { dx: 0, dy: 0 };
 
   const gap = opts.gap ?? PLACEMENT_GAP;
-  const step = opts.step ?? PLACEMENT_STEP;
+  const baseStep = opts.step ?? PLACEMENT_STEP;
   const maxTries = opts.maxTries ?? PLACEMENT_MAX_TRIES;
 
-  for (const off of spiralOffsets(step, maxTries)) {
-    let ok = true;
-    for (const r of desiredRects) {
-      const cand: Rect = { x: r.x + off.dx, y: r.y + off.dy, w: r.w, h: r.h };
-      if (anyIntersect(cand, existing, gap)) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return { dx: off.dx, dy: off.dy };
+  // Pass 1: 紧凑搜索 (小 step, 找近邻空隙)
+  const pass1Tries = Math.min(24, maxTries);
+  const hit1 = spiralSearchBatch(desiredRects, existing, baseStep, pass1Tries, gap);
+  if (hit1) return hit1;
+
+  // Pass 2: 自适应大 step (跨越大节点)
+  const adaptStep = computeAdaptiveStep([...desiredRects, ...existing], gap, baseStep);
+  if (adaptStep > baseStep) {
+    const hit2 = spiralSearchBatch(desiredRects, existing, adaptStep, maxTries, gap);
+    if (hit2) return hit2;
   }
 
   // 兜底: 把整组挪到最右边
