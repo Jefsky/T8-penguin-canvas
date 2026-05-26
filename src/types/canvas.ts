@@ -127,6 +127,8 @@ export interface ApiSettings {
   canvasAutoSavePath?: string;
   // v1.3.4: 资源库路径(资源文件 + resource_library.json 元数据)
   resourceLibraryPath?: string;
+  // v1.3.6: 自定义主题模板路径(主题 JSON 文件)
+  themeTemplatePath?: string;
   preferences?: {
     theme?: 'dark' | 'light';
     language?: string;

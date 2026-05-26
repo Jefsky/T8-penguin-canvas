@@ -77,6 +77,8 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
   const [canvasAutoSavePathInput, setCanvasAutoSavePathInput] = useState<string>('');
   // v1.3.4: 资源库路径输入
   const [resourceLibraryPathInput, setResourceLibraryPathInput] = useState<string>('');
+  // v1.3.6: 主题模板路径输入
+  const [themeTemplatePathInput, setThemeTemplatePathInput] = useState<string>('');
   // 分类独立 Key 区块折叠状态（新手友好：默认折叠，点击展开）
   const [classifiedOpen, setClassifiedOpen] = useState(false);
   // 眼睛预览拉取的明文（仅缓存，不提交）
@@ -98,6 +100,7 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
       setFileSavePathInput((settings as any)?.fileSavePath || '');
       setCanvasAutoSavePathInput((settings as any)?.canvasAutoSavePath || '');
       setResourceLibraryPathInput((settings as any)?.resourceLibraryPath || '');
+      setThemeTemplatePathInput((settings as any)?.themeTemplatePath || '');
     }
   }, [open, settings]);
 
@@ -151,6 +154,11 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
     const oldResourcePath = (settings as any)?.resourceLibraryPath || '';
     if (newResourcePath && newResourcePath !== oldResourcePath) {
       (patch as any).resourceLibraryPath = newResourcePath;
+    }
+    const newThemeTemplatePath = (themeTemplatePathInput || '').trim();
+    const oldThemeTemplatePath = (settings as any)?.themeTemplatePath || '';
+    if (newThemeTemplatePath && newThemeTemplatePath !== oldThemeTemplatePath) {
+      (patch as any).themeTemplatePath = newThemeTemplatePath;
     }
     if (Object.keys(patch).length === 0) {
       onClose();
@@ -500,6 +508,31 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
             <div className={`flex items-center gap-2 flex-wrap text-[11px] mt-1.5 ${hintCls}`}>
               <span className="flex items-center gap-1.5">
                 <Lock size={11} /> 加入资源库会复制一份到此目录，删除资源只删除资源库副本。
+              </span>
+            </div>
+          </div>
+
+          {/* v1.3.6: 主题模板路径 */}
+          <div className={`pt-3 border-t ${isPixel ? 'border-[var(--px-ink)]/30' : isDark ? 'border-white/10' : 'border-black/10'}`}>
+            <label className={`text-sm font-medium flex items-center gap-2 flex-wrap ${labelCls}`}>
+              <FolderOpen size={14} className={isPixel ? 'text-[var(--px-ink)]' : isDark ? 'text-sky-300' : 'text-sky-600'} />
+              主题模板路径
+              <span className={`text-[11px] font-normal ${hintCls}`}>· 导入或编辑后的主题 JSON 保存在此路径</span>
+            </label>
+            <div className="flex items-center gap-2 mt-2">
+              <input
+                type="text"
+                value={themeTemplatePathInput}
+                onChange={(e) => setThemeTemplatePathInput(e.target.value)}
+                placeholder="例：D:\\zhenzhen\\theme-templates · 路径不存在时会自动创建"
+                className={inputCls}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className={`flex items-center gap-2 flex-wrap text-[11px] mt-1.5 ${hintCls}`}>
+              <span className="flex items-center gap-1.5">
+                <Lock size={11} /> 内置主题不可删除；自定义主题可导入、导出、编辑和删除。
               </span>
             </div>
           </div>

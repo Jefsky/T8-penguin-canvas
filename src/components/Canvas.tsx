@@ -25,6 +25,7 @@ import { Play, Copy, CopyPlus, Trash2, FolderPlus } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
 import { useCanvasStore } from '../stores/canvas';
 import { useThemeStore } from '../stores/theme';
+import { getTemplateMode, resolveThemeTemplate } from '../theme/defaultTemplates';
 import { useRunBusStore } from '../stores/runBus';
 import { useGroupBusStore, GROUP_COLORS, DEFAULT_GROUP_NAME } from '../stores/groupBus';
 import { topologicalSort } from '../utils/topologicalSort';
@@ -42,6 +43,7 @@ import CanvasToolbar from './CanvasToolbar';
 import TerminalPanel from './TerminalPanel';
 import NodeActionBar from './NodeActionBar';
 import MaterialDragOverlay from './MaterialDragOverlay';
+import ThemeMusicToggle from './ThemeMusicToggle';
 import { useCanvasHistory } from '../hooks/useCanvasHistory';
 import type { CanvasTemplate } from '../config/canvasTemplates';
 import PlaceholderNode from './nodes/PlaceholderNode';
@@ -259,7 +261,14 @@ interface CanvasInnerProps {
 
 function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   const { activeId } = useCanvasStore();
-  const { theme, style } = useThemeStore();
+  const { theme, style, templateId, customTemplates } = useThemeStore();
+  const currentTemplate = useMemo(
+    () => resolveThemeTemplate(templateId, customTemplates),
+    [templateId, customTemplates],
+  );
+  const visualStyle = currentTemplate.visuals?.style || style;
+  const isOp = visualStyle === 'op';
+  const themeTokens = getTemplateMode(currentTemplate, theme).tokens;
   const { screenToFlowPosition, setCenter, getViewport } = useReactFlow();
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
@@ -2438,15 +2447,11 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   }, []);
 
   const isDark = theme === 'dark';
-    const isPixel = style === 'pixel';
-    const guideColor = isPixel ? '#FF89A7' : '#fb923c';
-    const edgeStroke = isPixel ? '#1A1410' : isDark ? '#71717a' : '#a1a1aa';
-    const dotColor = isPixel
-      ? isDark ? '#5C4D3E' : '#C8B89A'
-      : isDark ? '#27272a' : '#d4d4d8';
-  const bgColor = isPixel
-    ? isDark ? '#1F1A14' : '#FAF3E7'
-    : isDark ? '#0a0a0b' : '#fafafa';
+  const isPixel = style === 'pixel';
+  const guideColor = themeTokens.edgeSelected;
+  const edgeStroke = themeTokens.edge;
+  const dotColor = themeTokens.gridDot;
+  const bgColor = themeTokens.canvasBg;
 
   const memoNodeTypes = useMemo(() => nodeTypes, []);
   const memoEdgeTypes = useMemo(() => edgeTypes, []);
@@ -2471,8 +2476,9 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   if (!activeId) {
     return (
       <div
-        className="flex-1 flex items-center justify-center"
-        style={{ background: bgColor, color: isDark ? '#71717a' : '#52525b' }}
+        className="t8-canvas-shell flex-1 flex items-center justify-center"
+        data-theme-visual={visualStyle}
+        style={{ background: bgColor, color: themeTokens.textMuted }}
       >
         <div className="text-center">
           <div className="text-2xl mb-2 font-bold tracking-wide">🐧 贞贞的无限画布（企鹅共创版）</div>
@@ -2483,7 +2489,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   }
 
   return (
-    <div className="flex-1 relative" style={{ background: bgColor }}>
+    <div className="t8-canvas-shell flex-1 relative" data-theme-visual={visualStyle} style={{ background: bgColor }}>
       <CanvasToolbar
         canUndo={canUndo}
         canRedo={canRedo}
@@ -2592,11 +2598,19 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
             </svg>
           </ViewportPortal>
         )}
+        <ThemeMusicToggle template={currentTemplate} />
         <Controls
           style={{
-            background: isDark ? 'rgba(20,20,22,.9)' : 'rgba(255,255,255,.9)',
-            border: `1px solid ${isDark ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.08)'}`,
-            borderRadius: 8,
+            background: isOp
+              ? themeTokens.panelBg
+              : isDark ? 'rgba(20,20,22,.9)' : 'rgba(255,255,255,.9)',
+            border: isOp
+              ? `3px solid ${themeTokens.textMain}`
+              : `1px solid ${isDark ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.08)'}`,
+            borderRadius: isOp ? '16px 16px 8px 8px' : 8,
+            left: isOp ? 18 : undefined,
+            bottom: isOp ? 34 : undefined,
+            boxShadow: isOp ? `4px 4px 0 ${themeTokens.textMain}` : undefined,
           }}
         />
         <MiniMap
@@ -2608,13 +2622,25 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
             setCenter(position.x, position.y, { zoom, duration: 400 });
           }}
           style={{
-            background: isDark ? 'rgba(20,20,22,.9)' : 'rgba(255,255,255,.9)',
-            border: `1px solid ${isDark ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.08)'}`,
-            borderRadius: 8,
+            width: isOp ? 144 : undefined,
+            height: isOp ? 144 : undefined,
+            background: isOp
+              ? themeTokens.panelBg
+              : isDark ? 'rgba(20,20,22,.9)' : 'rgba(255,255,255,.9)',
+            border: isOp
+              ? `4px double ${themeTokens.textMain}`
+              : `1px solid ${isDark ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.08)'}`,
+            borderRadius: isOp ? 999 : 8,
+            right: isOp ? 24 : undefined,
+            bottom: isOp ? 42 : undefined,
+            boxShadow: isOp
+              ? `0 0 0 7px ${themeTokens.warning}, 5px 5px 0 ${themeTokens.textMain}`
+              : undefined,
             cursor: 'pointer',
+            overflow: isOp ? 'hidden' : undefined,
           }}
-          maskColor={isDark ? 'rgba(0,0,0,.6)' : 'rgba(255,255,255,.6)'}
-          nodeColor={() => (isDark ? '#a1a1aa' : '#52525b')}
+          maskColor={isOp ? 'rgba(15,124,140,.28)' : isDark ? 'rgba(0,0,0,.6)' : 'rgba(255,255,255,.6)'}
+          nodeColor={() => (isOp ? themeTokens.secondary : isDark ? '#a1a1aa' : '#52525b')}
         />
         {/* 选中可执行节点时的浮动操作栏 (执行 / 中止 / 关闭) */}
         <NodeActionBar />

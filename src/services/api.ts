@@ -3,6 +3,7 @@
  * 所有请求走 Vite proxy → http://127.0.0.1:18766
  */
 import type { ApiSettings, CanvasData, CanvasListItem } from '../types/canvas';
+import type { ThemeTemplate } from '../theme/types';
 
 const BASE = '/api';
 
@@ -357,6 +358,41 @@ export function updateResourceItem(id: string, patch: Partial<Pick<ResourceItem,
 
 export function deleteResourceItem(id: string) {
   return safeRequest<void>(`${BASE}/resources/items/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+// ========== 主题模板 (v1.3.6) ==========
+
+export interface ThemeTemplatesResponse {
+  path: string;
+  templates: ThemeTemplate[];
+}
+
+export function getThemeTemplates() {
+  return safeRequest<ThemeTemplatesResponse>(`${BASE}/themes/templates`);
+}
+
+export function importThemeTemplate(template: ThemeTemplate) {
+  return safeRequest<ThemeTemplate>(`${BASE}/themes/templates/import`, {
+    method: 'POST',
+    body: JSON.stringify({ template }),
+  });
+}
+
+export function saveThemeTemplate(template: ThemeTemplate) {
+  return safeRequest<ThemeTemplate>(`${BASE}/themes/templates/${encodeURIComponent(template.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(template),
+  });
+}
+
+export function exportThemeTemplate(id: string) {
+  return safeRequest<ThemeTemplate>(`${BASE}/themes/templates/${encodeURIComponent(id)}/export`);
+}
+
+export function deleteThemeTemplate(id: string) {
+  return safeRequest<void>(`${BASE}/themes/templates/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
 }

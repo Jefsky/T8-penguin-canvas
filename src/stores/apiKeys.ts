@@ -37,6 +37,8 @@ const DEFAULT: ApiSettings = {
   canvasAutoSavePath: 'D:\\zhenzhen',
   // v1.3.4: 资源库路径默认值
   resourceLibraryPath: 'D:\\zhenzhen\\resources',
+  // v1.3.6: 主题模板路径默认值
+  themeTemplatePath: 'D:\\zhenzhen\\theme-templates',
   preferences: { theme: 'dark', language: 'zh-CN' },
 };
 
