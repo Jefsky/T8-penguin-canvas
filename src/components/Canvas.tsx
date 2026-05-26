@@ -1104,6 +1104,23 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
   const closePaneMenu = useCallback(() => setPaneMenu(null), []);
 
+  const openNodeContextMenuAt = useCallback(
+    (clientX: number, clientY: number, nodeId: string) => {
+      const currentNodes = nodesRef.current;
+      let ids: string[];
+      const currentSelected = currentNodes.filter((n) => n.selected).map((n) => n.id);
+      if (currentSelected.includes(nodeId) && currentSelected.length > 1) {
+        ids = currentSelected;
+      } else {
+        setNodes((prev) => prev.map((n) => ({ ...n, selected: n.id === nodeId })));
+        ids = [nodeId];
+      }
+      setPaneMenu(null);
+      setContextMenu({ x: clientX, y: clientY, ids });
+    },
+    []
+  );
+
   // 选区右键(框选 ≥ 1 个节点后右键)
   const onSelectionContextMenu = useCallback(
     (e: React.MouseEvent, sels: Node[]) => {
@@ -1119,17 +1136,28 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   const onNodeContextMenu = useCallback(
     (e: React.MouseEvent, node: Node) => {
       e.preventDefault();
-      let ids: string[];
-      const currentSelected = nodes.filter((n) => n.selected).map((n) => n.id);
-      if (currentSelected.includes(node.id) && currentSelected.length > 1) {
-        ids = currentSelected;
-      } else {
-        setNodes((prev) => prev.map((n) => ({ ...n, selected: n.id === node.id })));
-        ids = [node.id];
-      }
-      setContextMenu({ x: e.clientX, y: e.clientY, ids });
+      openNodeContextMenuAt(e.clientX, e.clientY, node.id);
     },
-    [nodes]
+    [openNodeContextMenuAt]
+  );
+
+  // ReactFlow 的 onNodeContextMenu 在 input/select/button 等 nodrag 控件上可能不会触发。
+  // 用画布根节点捕获阶段兜底：只要右键落在节点内且不是素材预览，就打开原节点菜单。
+  const onCanvasContextMenuCapture = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (!target) return;
+      if (target.closest('[data-resource-context-menu]')) return;
+      if (target.closest('[data-drag-source]')) return;
+      const nodeEl = target.closest('.react-flow__node') as HTMLElement | null;
+      const nodeId = nodeEl?.getAttribute('data-id') || '';
+      if (!nodeId || nodeId === BULK_PHANTOM_ID) return;
+      if (!nodesRef.current.some((n) => n.id === nodeId)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openNodeContextMenuAt(e.clientX, e.clientY, nodeId);
+    },
+    [openNodeContextMenuAt]
   );
 
   // 空白处右键: 弹出快速添加节点菜单(同时关闭选区菜单)
@@ -2489,7 +2517,12 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
   }
 
   return (
-    <div className="t8-canvas-shell flex-1 relative" data-theme-visual={visualStyle} style={{ background: bgColor }}>
+    <div
+      className="t8-canvas-shell flex-1 relative"
+      data-theme-visual={visualStyle}
+      style={{ background: bgColor }}
+      onContextMenuCapture={onCanvasContextMenuCapture}
+    >
       <CanvasToolbar
         canUndo={canUndo}
         canRedo={canRedo}
@@ -2654,6 +2687,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
         <>
           {/* 遮罩层:点击空白关闭 (fixed 覆盖整个视口,确保点击空白区域可关闭) */}
           <div
+            data-canvas-floating-ui="picker-backdrop"
             className="fixed inset-0 z-30"
             onClick={() => setPicker(null)}
             onContextMenu={(e) => {
@@ -2662,6 +2696,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
             }}
           />
           <div
+            data-canvas-floating-ui="picker-menu"
             className="fixed z-40 rounded-xl overflow-hidden"
             style={{
               // 使用 fixed + clientX/clientY (视口坐标) 让菜单精确跟随鼠标释放位置
@@ -2795,6 +2830,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
           <>
             {/* 遮罩层 */}
             <div
+              data-canvas-floating-ui="node-menu-backdrop"
               className="fixed inset-0 z-30"
               onClick={closeContextMenu}
               onContextMenu={(e) => {
@@ -2803,6 +2839,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
               }}
             />
             <div
+              data-canvas-floating-ui="node-menu"
               className="fixed z-40 overflow-hidden"
               style={{
                 left: Math.min(contextMenu.x, window.innerWidth - 220),
@@ -2918,6 +2955,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
           <>
             {/* 遮罩层 */}
             <div
+              data-canvas-floating-ui="pane-menu-backdrop"
               className="fixed inset-0 z-30"
               onClick={closePaneMenu}
               onContextMenu={(e) => {
@@ -2926,6 +2964,7 @@ function CanvasInner({ onAddNodeRef }: CanvasInnerProps) {
               }}
             />
             <div
+              data-canvas-floating-ui="pane-menu"
               className="fixed z-40 overflow-hidden"
               style={{
                 left: Math.min(paneMenu.x, window.innerWidth - 220),

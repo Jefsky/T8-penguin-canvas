@@ -50,20 +50,8 @@ export default function MaterialContextMenu() {
 
   useEffect(() => {
     const onContext = (e: MouseEvent) => {
-      const stack = document.elementsFromPoint(e.clientX, e.clientY);
-      let source: HTMLElement | null = null;
-      for (const el of stack) {
-        if (!(el instanceof HTMLElement)) continue;
-        if (el.hasAttribute('data-drag-source')) {
-          source = el;
-          break;
-        }
-        const closest = el.closest('[data-drag-source]') as HTMLElement | null;
-        if (closest) {
-          source = closest;
-          break;
-        }
-      }
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const source = target?.closest('[data-drag-source]') as HTMLElement | null;
       if (!source) return;
       const kind = source.getAttribute('data-drag-kind');
       const url = source.getAttribute('data-drag-url') || '';

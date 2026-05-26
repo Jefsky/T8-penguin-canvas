@@ -307,13 +307,14 @@ html[data-theme-visual="op"] .t8-canvas-shell::after {
   pointer-events: none;
 }
 
-html[data-theme-visual="op"] .t8-canvas-shell > :not(.t8-canvas-toolbar) {
+html[data-theme-visual="op"] .t8-canvas-shell > .react-flow {
   position: relative;
-  z-index: 1;
+  z-index: 1 !important;
 }
 
-html[data-theme-visual="op"] .t8-canvas-shell > .react-flow {
-  z-index: 1 !important;
+html[data-theme-visual="op"] .t8-canvas-shell > [data-canvas-floating-ui] {
+  position: fixed !important;
+  z-index: 80 !important;
 }
 
 html[data-theme-visual="op"] .react-flow__background {
