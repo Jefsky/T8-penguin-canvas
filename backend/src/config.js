@@ -1,5 +1,11 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+
+// 跨平台默认路径：Windows 用 D:\zhenzhen，其他系统用 ~/zhenzhen
+const DEFAULT_HOME_DIR = process.platform === 'win32' ? 'D:\\zhenzhen' : path.join(os.homedir(), 'zhenzhen');
+const DEFAULT_RESOURCES_DIR = path.join(DEFAULT_HOME_DIR, 'resources');
+const DEFAULT_THEMES_DIR = path.join(DEFAULT_HOME_DIR, 'theme-templates');
 
 // T8-penguin-canvas 后端配置
 // 运行模式:
@@ -60,15 +66,15 @@ const config = {
   // v1.2.10.2: 全局生成素材自动保存到本地的默认路径
   //   用户可在「API 设置 → 文件自动保存路径」覆盖。
   //   不存在时启动会自动创建; 写入失败仅 console.warn, 不阻断业务。
-  DEFAULT_LOCAL_SAVE_DIR: 'D:\\zhenzhen',
+  DEFAULT_LOCAL_SAVE_DIR: DEFAULT_HOME_DIR,
   // v1.3.1: 画布自动保存导出路径默认同本地素材保存路径。
   //   实际文件会写入 <path>/T8-penguin-canvas/canvases/*.json。
-  DEFAULT_CANVAS_AUTO_SAVE_DIR: 'D:\\zhenzhen',
+  DEFAULT_CANVAS_AUTO_SAVE_DIR: DEFAULT_HOME_DIR,
   // v1.3.4: 资源库默认路径。资源文件与 resource_library.json 元数据均保存在此路径,
   //   用户更换版本后只要设置同一路径即可继续读取资源库。
-  DEFAULT_RESOURCE_LIBRARY_DIR: 'D:\\zhenzhen\\resources',
+  DEFAULT_RESOURCE_LIBRARY_DIR: DEFAULT_RESOURCES_DIR,
   // v1.3.6: 主题模板目录。自定义模板 JSON 保存在这里，内置模板仍打包在前端代码里。
-  DEFAULT_THEME_TEMPLATE_DIR: 'D:\\zhenzhen\\theme-templates',
+  DEFAULT_THEME_TEMPLATE_DIR: DEFAULT_THEMES_DIR,
 };
 
 // 提前创建打包后的数据目录(避免首次启动报错)

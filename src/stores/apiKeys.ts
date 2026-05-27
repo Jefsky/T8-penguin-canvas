@@ -31,14 +31,14 @@ const DEFAULT: ApiSettings = {
   grokApiKey: '',
   seedanceApiKey: '',
   sunoApiKey: '',
-  // v1.2.10.2: 全局生成素材自动保存路径默认值
-  fileSavePath: 'D:\\zhenzhen',
+  // v1.2.10.2: 全局生成素材自动保存路径默认值（跨平台）
+  fileSavePath: '',
   // v1.3.1: 画布自动保存路径默认值
-  canvasAutoSavePath: 'D:\\zhenzhen',
+  canvasAutoSavePath: '',
   // v1.3.4: 资源库路径默认值
-  resourceLibraryPath: 'D:\\zhenzhen\\resources',
+  resourceLibraryPath: '',
   // v1.3.6: 主题模板路径默认值
-  themeTemplatePath: 'D:\\zhenzhen\\theme-templates',
+  themeTemplatePath: '',
   preferences: { theme: 'dark', language: 'zh-CN' },
 };
 

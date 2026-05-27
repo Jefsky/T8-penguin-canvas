@@ -482,7 +482,7 @@ export default function ApiSettingsModal({ open, onClose }: ApiSettingsModalProp
             </div>
             <div className={`flex items-center gap-2 flex-wrap text-[11px] mt-1.5 ${hintCls}`}>
               <span className="flex items-center gap-1.5">
-                <Lock size={11} /> 默认 D:\zhenzhen；保存文件可直接用画布导入功能恢复。
+                <Lock size={11} /> 默认 zhenzhen 目录（Windows: D:\zhenzhen, macOS/Linux: ~/zhenzhen）；保存文件可直接用画布导入功能恢复。
               </span>
             </div>
           </div>
